@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="60dp"
+    android:height="24dp"
+    android:viewportWidth="60"
+    android:viewportHeight="24">
+    
+    <!-- Main Body -->
+    <path
+        android:fillColor="#B0BEC5"
+        android:pathData="M10,4 L50,4 L50,20 L10,20 Z"/>
+    
+    <!-- Grips -->
+    <path
+        android:fillColor="#37474F"
+        android:pathData="M15,4 L18,4 L18,20 L15,20 Z M22,4 L25,4 L25,20 L22,20 Z M29,4 L32,4 L32,20 L29,20 Z"/>
+        
+    <!-- Emitter Guard -->
+    <path
+        android:fillColor="#546E7A"
+        android:pathData="M50,2 L58,2 L60,6 L60,18 L58,22 L50,22 Z"/>
+        
+    <!-- Pommel -->
+    <path
+        android:fillColor="#546E7A"
+        android:pathData="M0,6 L10,6 L10,18 L0,18 Z"/>
+        
+    <!-- Highlight -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillAlpha="0.3"
+        android:pathData="M2,8 L58,8 L58,10 L2,10 Z"/>
+</vector>

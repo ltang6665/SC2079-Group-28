@@ -1,0 +1,360 @@
+import heapq
+import math
+from typing import List
+import numpy as np
+from entities.Robot import Robot
+from entities.Entity import Obstacle, CellState, Grid
+from consts import Direction, MOVE_DIRECTIONS, TURN_FACTOR, MAX_ITERATIONS, TURN_RADIUS, SAFE_TURN_COST, TURN_BIG, TURN_SMALL
+from python_tsp.exact import solve_tsp_dynamic_programming
+
+turn_adjustments = [
+    [TURN_BIG,     TURN_SMALL],
+    [TURN_BIG + 1, TURN_SMALL]
+]
+
+
+class MazeSolver:
+    def __init__(self, width: int, height: int, robot_x: int, robot_y: int, robot_dir: Direction, big_turn=None, allow_45=True):
+        self.grid = Grid(width, height)
+        self.robot = Robot(robot_x, robot_y, robot_dir)
+        self.path_map = {}
+        self.cost_map = {}
+        self.big_turn = 0 if big_turn is None else int(big_turn)
+        self.allow_45 = allow_45
+        self._safe_cost_cache = None
+
+    def addObstacle(self, x: int, y: int, direction: Direction, obstacle_id: int):
+        obstacle = Obstacle(x, y, direction, obstacle_id)
+        self.grid.addObstacle(obstacle)
+        self._safe_cost_cache = None
+
+    def resetObstacles(self):
+        self.grid.reset_obstacles()
+        self._safe_cost_cache = None
+
+    @staticmethod
+    def computeCoordDistance(x1: int, y1: int, x2: int, y2: int, level=1):
+        dx = x1 - x2
+        dy = y1 - y2
+        if level == 2:
+            return math.sqrt(dx ** 2 + dy ** 2)
+        return abs(dx) + abs(dy)
+
+    @staticmethod
+    def computeStateDistance(start: CellState, end: CellState, level=1):
+        return MazeSolver.computeCoordDistance(start.x, start.y, end.x, end.y, level)
+
+    @staticmethod
+    def getVisitOptions(count):
+        options = []
+        bits = bin(2 ** count - 1).count('1')
+        for i in range(2 ** count):
+            options.append(bin(i)[2:].zfill(bits))
+        options.sort(key=lambda val: val.count('1'), reverse=True)
+        return options
+
+    def getOptimalOrderDp(self, retry_flag) -> List[CellState]:
+        best_distance = 1e9
+        best_path = []
+
+        view_positions = self.grid.get_view_obstacle_positions(retry_flag)
+
+        for option in self.getVisitOptions(len(view_positions)):
+            items = [self.robot.getStartState()]
+            current_views = []
+
+            for idx, bit in enumerate(option):
+                if bit == '1':
+                    items += view_positions[idx]
+                    current_views.append(view_positions[idx])
+
+            self.generatePathCosts(items)
+
+            combinations = []
+            self.generateCombinations(current_views, 0, [], combinations, [MAX_ITERATIONS])
+
+            for combination in combinations:
+                visited_nodes = [0]
+                index_offset = 1
+                fixed_cost = 0
+
+                for i, view_set in enumerate(current_views):
+                    visited_nodes.append(index_offset + combination[i])
+                    fixed_cost += view_set[combination[i]].penalty
+                    index_offset += len(view_set)
+
+                cost_matrix = np.zeros((len(visited_nodes), len(visited_nodes)))
+
+                for start_idx in range(len(visited_nodes) - 1):
+                    for end_idx in range(start_idx + 1, len(visited_nodes)):
+                        start_state = items[visited_nodes[start_idx]]
+                        end_state = items[visited_nodes[end_idx]]
+                        if (start_state, end_state) in self.cost_map:
+                            cost_matrix[start_idx][end_idx] = self.cost_map[(start_state, end_state)]
+                        else:
+                            cost_matrix[start_idx][end_idx] = 1e9
+                        cost_matrix[end_idx][start_idx] = cost_matrix[start_idx][end_idx]
+
+                cost_matrix[:, 0] = 0
+                permutation, total_cost = solve_tsp_dynamic_programming(cost_matrix)
+
+                if total_cost + fixed_cost >= best_distance:
+                    continue
+
+                best_path = [items[0]]
+                best_distance = total_cost + fixed_cost
+
+                for i in range(len(permutation) - 1):
+                    start_state = items[visited_nodes[permutation[i]]]
+                    end_state = items[visited_nodes[permutation[i + 1]]]
+                    path_segment = self.path_map[(start_state, end_state)]
+                    for j in range(1, len(path_segment)):
+                        best_path.append(CellState(path_segment[j][0], path_segment[j][1], path_segment[j][2]))
+                    best_path[-1].setScreenshot(end_state.screenshot_id)
+
+            if best_path:
+                break
+
+        return best_path, best_distance
+
+    @staticmethod
+    def generateCombinations(view_positions, index, current, result, iterations):
+        if index == len(view_positions):
+            result.append(current[:])
+            return
+        if iterations[0] == 0:
+            return
+        iterations[0] -= 1
+        for j in range(len(view_positions[index])):
+            current.append(j)
+            MazeSolver.generateCombinations(view_positions, index + 1, current, result, iterations)
+            current.pop()
+
+    def printCaches(self):
+        """Print reachability and safe cost caches as ASCII grids to stdout."""
+        if self.grid._reachable_cache is None:
+            self.grid._build_reachable_cache()
+        if self._safe_cost_cache is None:
+            self._buildSafeCostCache()
+
+        w = self.grid.size_x
+        h = self.grid.size_y
+
+        print("\n=== OBSTACLES ===")
+        for ob in self.grid.obstacles:
+            print(f"  [{ob.obstacle_id}] ({ob.x},{ob.y}) dir={ob.direction}")
+
+        header = "    " + "".join(f"{x:2}" for x in range(w))
+
+        print("\n=== REACHABILITY (normal move) [. ok  X blocked] ===")
+        print(header)
+        for y in range(h - 1, -1, -1):
+            row = f"{y:2}  " + "".join(
+                " ." if self.grid._reachable_cache.get((x, y, False, False), False) else " X"
+                for x in range(w)
+            )
+            print(row)
+
+        print("\n=== REACHABILITY (turn destination) [. ok  X blocked] ===")
+        print(header)
+        for y in range(h - 1, -1, -1):
+            row = f"{y:2}  " + "".join(
+                " ." if self.grid._reachable_cache.get((x, y, True, False), False) else " X"
+                for x in range(w)
+            )
+            print(row)
+
+        print("\n=== SAFE COST [. = 0  S = penalized] ===")
+        print(header)
+        for y in range(h - 1, -1, -1):
+            row = f"{y:2}  " + "".join(
+                " ." if self._safe_cost_cache.get((x, y), 0) == 0 else " S"
+                for x in range(w)
+            )
+            print(row)
+        print()
+
+    def _buildSafeCostCache(self):
+        cache = {}
+        for x in range(self.grid.size_x):
+            for y in range(self.grid.size_y):
+                cost = 0
+                for ob in self.grid.obstacles:
+                    if ((abs(ob.x - x) == 2 and abs(ob.y - y) == 2) or
+                            (abs(ob.x - x) == 1 and abs(ob.y - y) == 2) or
+                            (abs(ob.x - x) == 2 and abs(ob.y - y) == 1) or
+                            (abs(ob.x - x) <= 1 and abs(ob.y - y) <= 1)):
+                        cost = SAFE_TURN_COST
+                        break
+                cache[(x, y)] = cost
+        self._safe_cost_cache = cache
+
+    def getSafeCost(self, x, y):
+        if self._safe_cost_cache is None:
+            self._buildSafeCostCache()
+        return self._safe_cost_cache.get((x, y), 0)
+
+    def _hasForwardClearance(self, x, y, direction, steps=2):
+        """True if `steps` cells directly ahead are reachable (for pre-turn safety)."""
+        fwd = {Direction.NORTH: (0, 1), Direction.EAST: (1, 0),
+               Direction.SOUTH: (0, -1), Direction.WEST: (-1, 0)}
+        if direction not in fwd:
+            return True
+        fdx, fdy = fwd[direction]
+        return all(self.grid.reachable(x + fdx * s, y + fdy * s) for s in range(1, steps + 1))
+
+    def _hasBackwardClearance(self, x, y, direction, steps=2):
+        """True if `steps` cells directly behind are reachable (for reverse-turn safety)."""
+        bwd = {Direction.NORTH: (0, -1), Direction.EAST: (-1, 0),
+               Direction.SOUTH: (0, 1), Direction.WEST: (1, 0)}
+        if direction not in bwd:
+            return True
+        bdx, bdy = bwd[direction]
+        return all(self.grid.reachable(x + bdx * s, y + bdy * s) for s in range(1, steps + 1))
+
+    def getNeighbors(self, x, y, direction):
+        neighbors = []
+
+        # Forward / backward
+        for dx, dy, new_dir in MOVE_DIRECTIONS:
+            if new_dir == direction:
+                if self.grid.reachable(x + dx, y + dy):
+                    cost = self.getSafeCost(x + dx, y + dy)
+                    neighbors.append((x + dx, y + dy, new_dir, cost))
+                if self.grid.reachable(x - dx, y - dy):
+                    cost = self.getSafeCost(x - dx, y - dy)
+                    neighbors.append((x - dx, y - dy, new_dir, cost))
+
+        # 45° diagonals
+        if self.allow_45:
+            for dx, dy, new_dir in MOVE_DIRECTIONS:
+                diff = (int(new_dir) - int(direction)) % 8
+                if diff in [1, 7]:
+                    if self.grid.reachable(x + dx, y + dy, turn=True) and self.grid.reachable(x, y, preTurn=True):
+                        cost = self.getSafeCost(x + dx, y + dy)
+                        neighbors.append((x + dx, y + dy, new_dir, cost + 5))
+
+        # 90° arcs
+        large_shift, small_shift = turn_adjustments[self.big_turn]
+        _fvec = {Direction.NORTH: (0, 1), Direction.EAST: (1, 0),
+                 Direction.SOUTH: (0, -1), Direction.WEST: (-1, 0)}
+        fwd_penalty = 0 if self._hasForwardClearance(x, y, direction) else SAFE_TURN_COST
+        bwd_clear = self._hasBackwardClearance(x, y, direction)
+        fvec = _fvec.get(direction, (0, 0))
+
+        if direction == Direction.NORTH:
+            for dx, dy, new_dir in [
+                (large_shift, small_shift, Direction.EAST),    # forward-right
+                (-small_shift, -large_shift, Direction.EAST),  # backward
+                (-large_shift, small_shift, Direction.WEST),   # forward-left
+                (small_shift, -large_shift, Direction.WEST),   # backward
+            ]:
+                is_fwd = fvec[0]*dx + fvec[1]*dy > 0
+                if not is_fwd and not bwd_clear:
+                    continue
+                if self.grid.reachable(x + dx, y + dy, turn=True) and self.grid.reachable(x, y, preTurn=True):
+                    cost = self.getSafeCost(x + dx, y + dy)
+                    neighbors.append((x + dx, y + dy, new_dir, cost + 10 + (fwd_penalty if is_fwd else 0)))
+
+        elif direction == Direction.EAST:
+            for dx, dy, new_dir in [
+                (small_shift, large_shift, Direction.NORTH),   # forward
+                (-large_shift, -small_shift, Direction.NORTH), # backward
+                (small_shift, -large_shift, Direction.SOUTH),  # forward
+                (-large_shift, small_shift, Direction.SOUTH),  # backward
+            ]:
+                is_fwd = fvec[0]*dx + fvec[1]*dy > 0
+                if not is_fwd and not bwd_clear:
+                    continue
+                if self.grid.reachable(x + dx, y + dy, turn=True) and self.grid.reachable(x, y, preTurn=True):
+                    cost = self.getSafeCost(x + dx, y + dy)
+                    neighbors.append((x + dx, y + dy, new_dir, cost + 10 + (fwd_penalty if is_fwd else 0)))
+
+        elif direction == Direction.SOUTH:
+            for dx, dy, new_dir in [
+                (large_shift, -small_shift, Direction.EAST),   # forward
+                (-small_shift, large_shift, Direction.EAST),   # backward
+                (-large_shift, -small_shift, Direction.WEST),  # forward
+                (small_shift, large_shift, Direction.WEST),    # backward
+            ]:
+                is_fwd = fvec[0]*dx + fvec[1]*dy > 0
+                if not is_fwd and not bwd_clear:
+                    continue
+                if self.grid.reachable(x + dx, y + dy, turn=True) and self.grid.reachable(x, y, preTurn=True):
+                    cost = self.getSafeCost(x + dx, y + dy)
+                    neighbors.append((x + dx, y + dy, new_dir, cost + 10 + (fwd_penalty if is_fwd else 0)))
+
+        elif direction == Direction.WEST:
+            for dx, dy, new_dir in [
+                (-small_shift, -large_shift, Direction.SOUTH), # forward
+                (large_shift, small_shift, Direction.SOUTH),   # backward
+                (-small_shift, large_shift, Direction.NORTH),  # forward
+                (large_shift, -small_shift, Direction.NORTH),  # backward
+            ]:
+                is_fwd = fvec[0]*dx + fvec[1]*dy > 0
+                if not is_fwd and not bwd_clear:
+                    continue
+                if self.grid.reachable(x + dx, y + dy, turn=True) and self.grid.reachable(x, y, preTurn=True):
+                    cost = self.getSafeCost(x + dx, y + dy)
+                    neighbors.append((x + dx, y + dy, new_dir, cost + 10 + (fwd_penalty if is_fwd else 0)))
+
+        return neighbors
+
+    def generatePathCosts(self, states: List[CellState]):
+        def recordPath(start, end, parents, total_cost):
+            self.cost_map[(start, end)] = total_cost
+            self.cost_map[(end, start)] = total_cost
+
+            path = []
+            node = (end.x, end.y, end.direction)
+
+            while node in parents:
+                path.append(node)
+                node = parents[node]
+            path.append(node)
+
+            self.path_map[(start, end)] = path[::-1]
+            self.path_map[(end, start)] = path
+
+        def astar(start: CellState, end: CellState):
+            if (start, end) in self.path_map:
+                return
+
+            g_costs = {(start.x, start.y, start.direction): 0}
+            open_set = [(self.computeStateDistance(start, end), start.x, start.y, start.direction)]
+            parents = {}
+            visited = set()
+
+            while open_set:
+                _, x, y, direction = heapq.heappop(open_set)
+                if (x, y, direction) in visited:
+                    continue
+                if end.isEq(x, y, direction):
+                    recordPath(start, end, parents, g_costs[(x, y, direction)])
+                    return
+
+                visited.add((x, y, direction))
+                current_cost = g_costs[(x, y, direction)]
+
+                for nx, ny, nd, safety_cost in self.getNeighbors(x, y, direction):
+                    if (nx, ny, nd) in visited:
+                        continue
+
+                    step_cost = math.sqrt((nx - x) ** 2 + (ny - y) ** 2)
+                    move_cost = Direction.rotation_cost(nd, direction) * TURN_FACTOR + step_cost + safety_cost
+
+                    if (nx, ny, nd) not in g_costs or g_costs[(nx, ny, nd)] > current_cost + move_cost:
+                        g_costs[(nx, ny, nd)] = current_cost + move_cost
+                        parents[(nx, ny, nd)] = (x, y, direction)
+
+                        heuristic = self.computeCoordDistance(nx, ny, end.x, end.y, level=2)
+                        total_cost = g_costs[(nx, ny, nd)] + heuristic
+                        heapq.heappush(open_set, (total_cost, nx, ny, nd))
+
+        for i in range(len(states) - 1):
+            for j in range(i + 1, len(states)):
+                astar(states[i], states[j])
+
+
+if __name__ == "__main__":
+    pass

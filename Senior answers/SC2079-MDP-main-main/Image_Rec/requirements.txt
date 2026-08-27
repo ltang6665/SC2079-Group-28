@@ -1,0 +1,4 @@
+# Model training dependencies
+# Install PyTorch separately first with the appropriate CUDA version:
+# https://pytorch.org/get-started/locally/
+ultralytics

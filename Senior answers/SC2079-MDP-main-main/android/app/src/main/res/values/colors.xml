@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Republic / Light Side Theme (Clean Tech) -->
+    <color name="white">#FFFFFF</color>
+
+    <!-- Backgrounds -->
+    <color name="bg_dark">#F5F5F7</color> <!-- Off White -->
+    <color name="bg_card">#FFFFFF</color>
+    <color name="bg_card_light">#FAFAFA</color>
+    <color name="divider">#E0E0E0</color>
+
+    <!-- Holo Palette (Muted for Light Mode) -->
+    <color name="neon_blue">#007AFF</color>   <!-- Republic Blue -->
+    <color name="neon_green">#34C759</color>
+    <color name="neon_red">#FF3B30</color>
+
+    <!-- Branding Colors -->
+    <color name="primary">#007AFF</color>
+    <color name="primary_light">#5AC8FA</color>
+    
+    <color name="secondary">#FF9500</color> <!-- Rebel Orange -->
+    
+    <color name="accent">#5856D6</color>
+    
+    <color name="tertiary">#FF2D55</color>
+
+    <!-- Text colors -->
+    <color name="text_primary">#1C1C1E</color>
+    <color name="text_secondary">#636366</color>
+    <color name="text_hint">#AEAEB2</color>
+    
+    <color name="status_success">#34C759</color>
+
+
+    <!-- Canvas Specific Colors -->
+    <color name="grid_line">#33000000</color> <!-- Very light translucent black (Grey) -->
+    
+    <color name="obstacle_body">#F2F2F7</color> <!-- Very Light Grey -->
+    <color name="obstacle_selected">#007AFF</color> 
+    <color name="obstacle_facing">#3A3A3C</color> <!-- Dark Grey -->
+    <color name="obstacle_shadow">#20000000</color>
+
+    <color name="robot_body">#8E8E93</color> <!-- Standard Grey -->
+    <color name="robot_direction">#FF3B30</color> <!-- Red -->
+    <color name="robot_shadow">#40000000</color>
+    
+    <color name="input_bg">#FFFFFF</color>
+</resources>

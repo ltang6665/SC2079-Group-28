@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+venv/
+.venv/
+
+# YOLO training outputs (large artifacts)
+runs/
+YOLO_runs*/
+exp*/
+*.pt
+*.yaml.bak
+
+# Dataset files
+datasets/
+*.zip

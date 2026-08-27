@@ -1,0 +1,244 @@
+import os
+import json
+from time import sleep
+from threading import Thread, Event
+from time import time
+import logging
+logging.basicConfig(level=logging.INFO)
+
+from dotenv import load_dotenv
+load_dotenv()
+
+from communications.android import Android
+from communications.pc import PC
+from communications.stm import STM
+from streaming.stream_server import StreamServer
+
+class Checklist:
+    """
+    Class for managing the checklist process.
+    """
+
+    def __init__(self):
+        """
+        Constructor for Checklist.
+        Initializes communication with Android tablet, PC, and STM32 microcontroller.
+        """
+        self.process_pc_stream = None
+        self.pc_thread = None
+        self.android_thread = None
+        self.stm_thread = None
+        
+        self.android = Android()
+        self.pc = PC()
+        self.stm = STM()
+        
+        self.stop_event = Event()
+        self.detect_event = Event()
+        
+        self.obstacles = []
+        self.detect_image = False
+        self.stm_stopped = False
+        self.stop = False
+        
+        self.segments = []
+        self.segments_index = 0
+        self.obstacle_order = []
+        
+        self.timeout = 2  # seconds
+
+    def startChecklistOne(self):
+        """
+        Starts the checklist process.
+        """
+        logging.info("Starting checklist 1 workflow.")
+        self.android.connect()
+        self.stm.connect()
+        
+        logging.info("Waiting for a message from Android...")
+        android_msg = self.android.waitReceive()
+        self.stm.send("FW20" + "\n")
+        
+        self.android.disconnect()
+        self.stm.disconnect()
+        
+    def testRpiAndroidPc(self):
+        """
+        Test the communication between Raspberry Pi, Android tablet, and PC.
+        """
+        logging.info("Starting RPi-Android-PC test.")
+        self.android.connect()
+        self.pc.connect()
+        obstacles = []
+
+        while True:
+            # messages come in the format "OBSTACLE,id,x,y,dir" e.g "OBSTACLE,2,50,160,NORTH"
+            # keep listening until receive "BEGIN"
+            android_msg = self.android.waitReceive()
+            if android_msg == "BEGIN":
+                logging.info("Received BEGIN from Android; obstacle input is now closed.")
+                break
+            #Convert OBSTACLE message to a dict with keys id, x, y, dir. dir converted to int where NORTH=0, EAST=2, SOUTH=4, WEST=6, SKIP=8 (for no obstacle)
+            
+            logging.info(f"Incoming Android message: {android_msg}")
+            msg_parts = android_msg.split(',')
+            if msg_parts[0] == "OBSTACLE":
+                obstacle = {
+                    "id": int(msg_parts[1]),
+                    "x": int(msg_parts[2]),
+                    "y": int(msg_parts[3]),
+                    "d": {"NORTH": 0, "EAST": 2, "SOUTH": 4, "WEST": 6, "SKIP": 8}.get(msg_parts[4], -1)
+                }
+                obstacles.append(obstacle)
+                logging.info(f"Obstacle recorded: {obstacle}")
+        
+        self.pc.send("OBSTACLES," + json.dumps(obstacles))
+        logging.info("Obstacle payload sent to PC.")
+        
+        pc_msg = self.pc.waitReceive()
+        logging.info(f"Incoming PC message: {pc_msg}")
+            
+        self.android.disconnect()
+        self.pc.disconnect()
+        
+    def checklistA5(self):
+        """
+        Send 4 obstacles on the same (x,y) but different directions to the PC. Get back commands and send to STM32. The robot will visit each side of the obstacle. If image is detected, end, else continue.
+        """
+        logging.info("Starting checklist A5 workflow.")
+        self.initialize()
+        
+        obstacles = [
+            {"x": 10, "y": 10, "id": 1, "d": 0},
+            {"x": 10, "y": 10, "id": 2, "d": 2},
+            {"x": 10, "y": 10, "id": 3, "d": 4},
+            {"x": 10, "y": 10, "id": 4, "d": 6},
+        ]
+        
+        self.process_pc_stream = Thread(target=self.streamStart)
+        self.process_pc_stream.start()
+        sleep(5)
+
+        logging.info("Starting stream.")
+        
+        self.pc_thread = Thread(target=self.pcReceive)
+        self.stm_thread = Thread(target=self.stmReceive)
+        self.pc_thread.start()
+        self.stm_thread.start()
+        self.pc.send("OBSTACLES," + json.dumps(obstacles))
+        logging.info("Obstacle payload sent to PC.")
+        self.pc_thread.join()
+        self.stm_thread.join()
+        
+    def initialize(self):
+        self.pc.connect()
+        self.stm.connect()
+        
+    def streamStart(self):
+        StreamServer().connect()
+            
+    def pcReceive(self) -> None:
+        while True:
+            try:
+                pc_msg = self.pc.receive()
+                print(f"Incoming PC message: {pc_msg}")
+                if pc_msg.startswith("PATH"):
+                    path = json.loads(pc_msg.split("PATH,")[1])
+                    self.segments = path['segments']
+                    self.obstacle_order = path['obstacle_ids']
+                    logging.info(f"Received path segments: {self.segments}")
+                    
+                    cmd = ",".join(self.segments[self.segments_index]) + "\n"
+                    self.stm.send(f"{cmd}")
+                    logging.info(f"Sent segment {self.segments_index + 1} to STM: {cmd}")
+                    self.segments_index += 1
+                elif pc_msg.startswith("OBJECT"):
+                    self.detect_image = False
+                    msg_split = pc_msg.split(",")[1:]
+
+                    obstacle_id, conf_str, object_id = msg_split
+                    confidence_level = None
+
+                    try:
+                        confidence_level = float(conf_str)
+                    except ValueError:
+                        confidence_level = None
+
+                    print("Detected object ID:", object_id)
+
+                    if confidence_level is not None:
+                        self.stop_event.set()
+                        self.detect_event.set()
+                        self.pc.send(f'STITCH')
+
+            except OSError as e:
+                print(f"Runtime error: {e}")
+                break
+            
+    def stmReceive(self) -> None:
+        while True:
+            try:
+                if self.stop_event.is_set():
+                    logging.info("Stop event is set.")
+                    break
+                stm_msg = self.stm.receive()
+                if not stm_msg:
+                    continue
+                print(f"Incoming STM message: {stm_msg}")
+                # if "SNAP" in stm_msg:
+                #     self.detect_image = True
+                #     message_content = f"DETECT,{self.obstacle_order[self.segments_index - 1]}"
+                #     self.pc.send(message_content.encode("utf-8"))
+                if "OK" in stm_msg:
+                    self.detect_image = True
+                    message_content = f"DETECT,{self.obstacle_order[self.segments_index - 1]}"
+                    self.pc.send(message_content)
+                    
+                    # end_time = time() + self.timeout
+                    # # if image still being processed, wait until done or timeout
+                    # while self.detect_image and time() < end_time:
+                    #     pass
+                    
+                    # if self.stop_event.is_set():
+                    #     logging.info("Stop event observed")
+                    #     break
+                    self.detect_event.clear()
+                    deadline = time() + self.timeout
+                    while True:
+                        if self.stop_event.is_set():
+                            logging.info("Stop observed in stmReceive; halting.")
+                            try:
+                                self.stm.send("S\n")   # optional
+                            except Exception:
+                                pass
+                            return  # or break the loop
+
+                        if self.detect_event.is_set():
+                            break  # PC replied with OBJECT
+
+                        if time() >= deadline:
+                            logging.info("Detection wait timed out.")
+                            break
+
+                        # tiny sleep to avoid hot loop; stm.receive is separate
+                        # (or use time.sleep(0.01))
+                        pass
+                    
+                    if self.segments_index < len(self.segments):
+                        cmd = ",".join(self.segments[self.segments_index]) + "\n"
+                        self.stm.send(f"{cmd}")
+                        logging.info(f"Sent segment {self.segments_index + 1}/{len(self.segments)} to STM: {self.segments[self.segments_index]}")
+                        self.segments_index += 1
+                    else:
+                        self.pc.send(f'STITCH,{len(self.segments) - 1}') # -1 cause of FIN segment
+                        self.android.disconnect()
+                        self.pc.disconnect()
+                        self.stm.disconnect()
+            except OSError as e:
+                    print(f"Runtime error: {e}")
+                    continue
+        
+
+if __name__ == "__main__":
+    checklist = Checklist()
+    checklist.checklistA5()

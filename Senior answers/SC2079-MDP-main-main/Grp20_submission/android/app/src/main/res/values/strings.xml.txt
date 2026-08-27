@@ -1,0 +1,42 @@
+<resources>
+    <string name="app_name">MDP 20</string>
+
+    <!-- Strings used for buttons in activity_bluetooth.xml -->
+    <string name="canvas">Manual Override</string>
+
+
+    <!-- Strings used for buttons in activity_canvas.xml -->
+    <string name="start_robot">Launch</string>
+    <string name="input_prompt">Type a message...</string>
+    <string name="send_input">Send</string>
+
+    <string name="initialize_robot">Set Coordinates</string>
+    <string name="send_data">Send Data</string>
+
+
+
+    <string-array name="robot_facing_options">
+        <item>NORTH</item>
+        <item>EAST</item>
+        <item>SOUTH</item>
+        <item>WEST</item>
+    </string-array>
+
+    <string name="map">MAP</string>
+    <string name="logs">LOGS</string>
+    <string name="status">STATUS:</string>
+    <string name="waiting">WAITING</string>
+    <string name="save_map">SAVE MAP</string>
+    <string name="load_map">LOAD MAP</string>
+    <string name="clear_map">CLEAR MAP</string>
+    <string name="communication_history">COMMUNICATION HISTORY</string>
+    <string name="system_ready">> System ready.</string>
+    <string name="a_project_by">A  P R O J E C T  B Y</string>
+    <string name="mdp_group_20">mdp group 20</string>
+    <string name="stable">> Stable.</string>
+    <string name="scan_devices">SCAN DEVICES</string>
+    <string name="discoverable">DISCOVERABLE</string>
+    <string name="initialise_launch">INITIALISE LAUNCH</string>
+    <string name="detected_signals">DETECTED SIGNALS</string>
+
+</resources>

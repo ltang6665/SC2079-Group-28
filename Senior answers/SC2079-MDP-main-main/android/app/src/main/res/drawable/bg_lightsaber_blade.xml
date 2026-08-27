@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Outer Glow (Soft, wide) -->
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="#8000FF00"/> <!-- Semi-transparent green glow -->
+            <corners android:radius="12dp"/>
+            <padding android:top="2dp" android:bottom="2dp" android:left="0dp" android:right="6dp"/>
+        </shape>
+    </item>
+    
+    <!-- Inner Glow (Harder, tighter) -->
+    <item android:top="2dp" android:bottom="2dp">
+        <shape android:shape="rectangle">
+            <solid android:color="#FF00FF00"/> <!-- Solid Green -->
+            <corners android:radius="10dp"/>
+            <padding android:top="2dp" android:bottom="2dp" android:left="0dp" android:right="2dp"/>
+        </shape>
+    </item>
+
+    <!-- Core (Pure White) -->
+    <item android:top="4dp" android:bottom="4dp">
+        <shape android:shape="rectangle">
+            <solid android:color="#FFFFFFFF"/> <!-- Solid White Core -->
+            <corners android:radius="8dp"/>
+        </shape>
+    </item>
+</layer-list>

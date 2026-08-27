@@ -1,0 +1,22 @@
+# STM32CubeIDE build artifacts
+**/Debug/
+**/Release/
+**/.metadata/
+**/.settings/
+
+# Compiled binaries
+*.elf
+*.hex
+*.bin
+*.map
+*.list
+*.mp4
+
+# Object files and makefiles (auto-generated)
+*.o
+*.launch
+objects.list
+objects.mk
+sources.mk
+makefile
+

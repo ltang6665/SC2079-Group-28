@@ -1,0 +1,338 @@
+import os
+import json
+import logging
+from threading import Thread, Lock, Event, Timer
+from time import time, sleep
+logging.basicConfig(level=logging.INFO)
+
+from dotenv import load_dotenv
+load_dotenv()
+
+from communications.android import Android
+from communications.pc import PC
+from communications.stm import STM
+
+from streaming.stream_server import StreamServer
+
+class Task1:
+    """
+    Class for managing Task 1 process.
+    """
+
+    def __init__(self):
+        """
+        Constructor for Task1.
+        Initializes communication with Android tablet, PC, and STM32 microcontroller.
+        """
+        self.process_pc_stream = None
+        self.pc_thread = None
+        self.android_thread = None
+        self.stm_thread = None
+        
+        self.android = Android()
+        self.pc = PC()
+        self.stm = STM()
+        
+        self.obstacles = []
+        self.started = False
+        self.path_requested = False
+        
+        self.segments = []
+        self.segments_index = 0
+        self.obstacle_order = []
+        
+        self.directions = []
+        self.direction_index = 0
+        
+        self._idx_lock = Lock()
+        self.image_done = Event()
+        self.path_ready = Event()  # set once PATH segments are received from PC
+        self._debounce_lock = Lock()
+        self._calc_timer = None
+        self._debounce_delay = 1.0  # seconds after last obstacle before auto-calculating
+        
+        self.timeout = 0.5  # seconds: max wait for PC image response before moving on
+        try:
+            self.segment_delay = max(0.0, float(os.getenv("SEGMENT_DELAY_S", "0.5")))
+        except ValueError:
+            self.segment_delay = 0.5
+        try:
+            self.detect_retries = max(0, int(os.getenv("DETECT_RETRY_COUNT", "1")))
+        except ValueError:
+            self.detect_retries = 1
+        try:
+            self.detect_retry_delay = max(0.0, float(os.getenv("DETECT_RETRY_DELAY_S", "0.2")))
+        except ValueError:
+            self.detect_retry_delay = 0.2
+        logging.info(f"Configured inter-segment delay: {self.segment_delay:.2f}s")
+        logging.info(
+            f"Configured DETECT retry policy: retries={self.detect_retries}, "
+            f"retry_delay={self.detect_retry_delay:.2f}s, timeout={self.timeout:.2f}s"
+        )
+
+    def _schedule_path_calculation(self):
+        """Debounced trigger: calculate path 1s after the last obstacle is received."""
+        with self._debounce_lock:
+            if self._calc_timer is not None:
+                self._calc_timer.cancel()
+            self._calc_timer = Timer(self._debounce_delay, self._request_path_from_pc)
+            self._calc_timer.daemon = True
+            self._calc_timer.start()
+            logging.info(f"Path calculation scheduled in {self._debounce_delay}s...")
+
+    def _request_path_from_pc(self) -> bool:
+        """Send current obstacles to PC for path computation."""
+        if self.path_requested:
+            logging.info("PATH request already in flight; skipping duplicate OBSTACLES send.")
+            return False
+        self.pc.send("OBSTACLES," + json.dumps(self.obstacles) + "\n")
+        self.path_requested = True
+        logging.info("Sent obstacles to PC for path computation.")
+        return True
+
+    def _send_next_segment(self) -> bool:
+        """
+        Send the current segment to STM and advance index.
+        Returns True if a segment was sent, False otherwise.
+        """
+        with self._idx_lock:
+            if self.segments_index < 0 or self.segments_index >= len(self.segments):
+                return False
+            seg = self.segments[self.segments_index]
+            self.segments_index += 1
+
+        cmd = ",".join(seg) + "\n"
+        self.stm.send(cmd)
+        logging.info(f"Sent path segment {self.segments_index}/{len(self.segments)} to STM: {seg}")
+        return True
+
+    def _request_detect_with_retry(self, obstacle_id: str) -> bool:
+        """
+        Request image detection for an obstacle and retry when no OBJECT reply arrives.
+        Returns True if OBJECT was received, False otherwise.
+        """
+        total_attempts = self.detect_retries + 1
+        for attempt in range(1, total_attempts + 1):
+            self.image_done.clear()
+            self.pc.send(f"DETECT,{obstacle_id}\n")
+            logging.info(f"Sent DETECT for obstacle {obstacle_id} (attempt {attempt}/{total_attempts})")
+
+            if self.image_done.wait(timeout=self.timeout):
+                logging.info(f"Received OBJECT for obstacle {obstacle_id} on attempt {attempt}.")
+                return True
+
+            if attempt < total_attempts:
+                logging.warning(
+                    f"No OBJECT received for obstacle {obstacle_id} within {self.timeout:.2f}s; "
+                    "retrying DETECT once more."
+                )
+                if self.detect_retry_delay > 0:
+                    sleep(self.detect_retry_delay)
+
+        logging.warning(
+            f"No OBJECT received for obstacle {obstacle_id} after {total_attempts} DETECT attempt(s)."
+        )
+        return False
+            
+    def stream_start(self):
+        StreamServer().connect()
+            
+    def android_receive(self) -> None:
+        while True:
+            try:
+                android_msg = self.android.receive()
+                if not android_msg:
+                    continue
+                android_msg = android_msg.strip()
+                if not android_msg:
+                    continue
+
+                if android_msg == "BEGIN":
+                    # BEGIN can arrive before PATH. Never index segments directly here.
+                    if not self.started:
+                        logging.info("Received BEGIN from Android, ending obstacle input.")
+                        self.started = True
+
+                    with self._idx_lock:
+                        self.segments_index = 0
+
+                    # If PATH isn't ready yet, just wait — Send Data is responsible for triggering calculation.
+                    if not self.path_ready.is_set():
+                        logging.info("BEGIN received but PATH not ready yet; waiting for PC response.")
+                        continue
+
+                    # PATH ready: send first segment if available
+                    if not self._send_next_segment():
+                        logging.warning("BEGIN received but no segments available to send.")
+                        continue
+                else:
+                    msg_parts = android_msg.split(',')
+                    if msg_parts[0] == "OBSTACLE":
+                        obstacle = {
+                            "id": int(msg_parts[1]),
+                            "x": int(msg_parts[2]) / 10,
+                            "y": int(msg_parts[3]) / 10,
+                            "d": {"NORTH": 0, "EAST": 2, "SOUTH": 4, "WEST": 6, "SKIP": 8}.get(msg_parts[4].strip())
+                        }
+                        self.obstacles.append(obstacle)
+                        self.path_ready.clear()
+                        self.path_requested = False
+                        logging.info(f"Added obstacle: {obstacle}")
+                        # Pre-calculate: 1s after the last obstacle arrives, start computing
+                        self._schedule_path_calculation()
+                    elif msg_parts[0] == "CLEAR":
+                        with self._debounce_lock:
+                            if self._calc_timer is not None:
+                                self._calc_timer.cancel()
+                                self._calc_timer = None
+                        self.obstacles = []
+                        self.obstacle_order = []
+                        self.path_ready.clear()
+                        self.path_requested = False
+                        logging.info("Cleared obstacles list.")
+                    elif msg_parts[0].strip() == "PATH" or android_msg.startswith("ALG|"):
+                        if self.started and self.path_ready.is_set():
+                            logging.info("Ignoring PATH request from Android; PATH already ready and mission started.")
+                        else:
+                            # User explicitly pressed "Send Data" — cancel any pending debounce
+                            # and force a fresh calculation even if one is already in-flight.
+                            with self._debounce_lock:
+                                if self._calc_timer is not None:
+                                    self._calc_timer.cancel()
+                                    self._calc_timer = None
+                            self.path_requested = False  # force fresh calculation, overwriting any in-flight request
+                            self._request_path_from_pc()
+            except OSError as e:
+                print(f"Error: {e}")
+                continue
+            
+    def pc_receive(self) -> None:
+        while True:
+            try:
+                pc_msg = self.pc.receive()
+                if pc_msg.startswith("PATH"):
+                    path = json.loads(pc_msg.split("PATH,")[1])
+                    logging.info(f"Received path segments: {path}")
+
+                    with self._idx_lock:
+                        self.segments = path.get('segments', [])
+                        self.obstacle_order = path.get('obstacle_ids', [])
+                        self.directions = path.get('dirs', [])
+                        # reset direction index when new PATH arrives
+                        self.direction_index = 0
+
+                    self.path_requested = False
+                    self.path_ready.set()
+
+                    # BEGIN may have arrived before PATH.
+                    if self.started and self.segments_index == 0:
+                        if not self._send_next_segment():
+                            logging.warning("Received PATH but no segments were provided.")
+                elif pc_msg.startswith("OBJECT"):
+                    self.image_done.set()
+                    msg_split = pc_msg.replace("\n", "").split(",")[1:]
+
+                    obstacle_id, conf_str, object_id = msg_split
+                    confidence_level = None
+
+                    try:
+                        confidence_level = float(conf_str)
+                    except ValueError:
+                        confidence_level = None
+
+                    logging.info(f"OBJECT ID: {object_id}")
+
+                    if confidence_level is not None:
+                        self.android.send(f"TARGET,{obstacle_id},{object_id}")
+
+            except OSError as e:
+                print(f"Error: {e}")
+                continue
+            
+    def stm_receive(self) -> None:
+        while True:
+            try:
+                stm_msg = self.stm.receive()
+                if not stm_msg:
+                    continue
+                logging.info(f"Received from STM: {stm_msg}")
+                if "RESEND" in stm_msg:
+                    with self._idx_lock:
+                        if not self.segments:
+                            logging.warning("RESEND received but no path segments are loaded yet.")
+                            continue
+                        last_idx = max(self.segments_index - 1, 0)
+                        cmd = ",".join(self.segments[last_idx]) + "\n"
+                    self.stm.send(cmd)
+                    logging.info(f"STM Error. Resending path segment{self.segments_index - 1}/{len(self.segments)}: {cmd}")
+                    
+                    self.image_done.wait(0.1)
+                elif "OK" in stm_msg:
+                    with self._idx_lock:
+                        just_finished_idx = self.segments_index - 1
+                        more_to_send = self.segments_index < len(self.segments)
+                    
+                    if just_finished_idx >= 0 and just_finished_idx < len(self.obstacle_order):
+                        self._request_detect_with_retry(str(self.obstacle_order[just_finished_idx]))
+                    
+                    if more_to_send:
+                        if self.segment_delay > 0:
+                            sleep(self.segment_delay)
+                        if not self._send_next_segment():
+                            logging.warning("Expected more segments, but none available to send.")
+                    else:
+                        self.pc.send(f'STITCH,{len(self.segments) - 1}\n')
+                        # self.android.disconnect()
+                        # self.pc.disconnect()
+                        # self.stm.disconnect()
+                elif "done" in stm_msg:
+                    if self.direction_index < len(self.directions):
+                        # x = self.directions[self.direction_index]['x']
+                        # y = self.directions[self.direction_index]['y']
+                        # direction = self.directions[self.direction_index]['d']
+                        # # self.android.send(f"ROBOT,{y},{x},{direction}")
+                        # self.direction_index += 1
+                        continue
+            except OSError as e:
+                print(f"Error: {e}")
+                continue
+    
+    def reconnect(self):
+        # while not self.android.connected:
+        #     self.android.accept_client()
+        pass
+        
+    def start(self):
+        """
+        Run Task 1: communicate with Android, PC, and STM32.
+        """
+        logging.info("Starting Task 1.")
+        self.android.start()
+        self.pc.connect()
+        self.stm.connect()
+        
+        self.process_pc_stream = Thread(target=self.stream_start)
+        self.process_pc_stream.start()
+        sleep(5)
+        
+        self.stm_thread = Thread(target=self.stm_receive)
+        self.pc_thread = Thread(target=self.pc_receive)
+        self.android_thread = Thread(target=self.android_receive)
+        self.android_reconnect = Thread(target=self.reconnect)
+        self.stm_thread.start()
+        self.pc_thread.start()
+        self.android_thread.start()
+        
+        self.stm_thread.join()
+        self.pc_thread.join()
+        self.android_thread.join()
+        
+        self.android_reconnect.start()
+        self.android_reconnect.join()
+        
+        logging.info("Task 1 completed.")
+        
+if __name__ == "__main__":
+    task1 = Task1()
+    task1.start()
+    

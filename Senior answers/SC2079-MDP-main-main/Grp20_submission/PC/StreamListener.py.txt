@@ -1,0 +1,203 @@
+import socket
+import struct
+import cv2
+import numpy as np
+import os
+import inspect  # <-- add this
+import logging
+
+from dotenv import load_dotenv
+load_dotenv()
+
+from ultralytics import YOLO
+
+
+class StreamListener:
+    """
+    TCP client for Pi streaming server.
+    Protocol:
+      - send 'stream_request\\n'
+      - server replies with a single line (e.g., 'OK STREAMING\\n')
+      - then a loop of: [4-byte big-endian length][JPEG bytes]
+      - to stop: send 'STOP\\n' and close
+
+    Callback signatures supported:
+      (A) onResult(result, annotated_frame, raw_frame)
+      (B) onResult(result, annotated_frame)   # legacy
+          - when there are no detections, annotated_frame will be the raw frame (not None)
+    """
+    def __init__(self, weights):
+        self.HOST = os.getenv("RPI_HOST")
+        self.PORT = int(os.getenv("STREAM_PORT", "5001"))
+        self.REQ_STREAM = bytes(os.getenv("REQ_STREAM") + "\n", "utf-8")
+        self.STOP_STREAM = bytes(os.getenv("STOP_STREAM") + "\n", "utf-8")
+        self.PING_STREAM = bytes(os.getenv("PING_STREAM") + "\n", "utf-8")
+
+        self.model = YOLO(weights)
+        self.sock = None
+
+    # --- low-level helpers ---
+    def connect(self):
+        self.sock = socket.create_connection((self.HOST, self.PORT), timeout=5)
+        try:
+            self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except Exception:
+            pass
+        self.sock.settimeout(None)
+
+    def readline(self, maxlen=256):
+        buf = bytearray()
+        while len(buf) < maxlen:
+            try:
+                ch = self.sock.recv(1)
+            except OSError:
+                return None
+            if not ch:
+                return None
+            buf += ch
+            if ch == b"\n":
+                break
+        return bytes(buf)
+
+    def recvExact(self, n):
+        data = bytearray()
+        while len(data) < n:
+            try:
+                chunk = self.sock.recv(n - len(data))
+            except OSError:
+                return None
+            if not chunk:
+                return None
+            data.extend(chunk)
+        return bytes(data)
+
+    # --- NEW: smart callback invoker (3-arg or 2-arg) ---
+    def invokeOnResult(self, cb, res, annotated, raw):
+        if cb is None:
+            return
+        try:
+            sig = inspect.signature(cb)
+            params = len(sig.parameters)
+        except Exception:
+            # Fallback: try 3-arg, else 2-arg
+            params = 3
+        try:
+            if params >= 3:
+                cb(res, annotated, raw)
+            else:
+                # legacy 2-arg: if no detections, send the raw frame instead of None
+                cb(res, annotated if annotated is not None else raw)
+        except Exception as e:
+            print(f"[StreamListener] callback error: {e}")
+
+    def reqStream(self):
+        if self.sock is None:
+            self.connect()
+        self.sock.sendall(self.REQ_STREAM)
+        header = self.readline()
+        header_txt = (header.decode("utf-8", errors="ignore").strip() if header else "")
+        if header_txt != "OK STREAMING":
+            raise RuntimeError(
+                f"Stream handshake failed: '{header_txt or 'NO HEADER'}'. "
+                f"Check the stream request settings on both sides."
+            )
+        logging.info("Stream handshake completed.")
+
+    def startStreamRead(self, onResult, on_disconnect, conf_threshold=0.7, show_video=True):
+        """
+        Connects, requests stream, and processes frames with YOLO.
+        Calls:
+          - onResult(result, annotated_frame, raw_frame)  # preferred
+          - or onResult(result, annotated_frame)          # legacy; raw is used if annotated is None
+          - on_disconnect() when the stream ends
+        Press ESC to stop (if show_video=True).
+        """
+        try:
+            self.reqStream()
+
+            while True:
+                # 1) read 4-byte length header
+                hdr = self.recvExact(4)
+                if hdr is None:
+                    break
+                size = struct.unpack("!I", hdr)[0]
+                if size <= 0 or size > 50_000_000:  # sanity check (50MB cap)
+                    break
+
+                # 2) read JPEG payload
+                jpg = self.recvExact(size)
+                if jpg is None:
+                    break
+
+                # 3) decode frame
+                frame = cv2.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
+                if frame is None:
+                    # corrupted frame; skip but still keep UI responsive
+                    self.invokeOnResult(onResult, None, None, None)
+                    continue
+
+                # 4) YOLO inference
+                res = self.model.predict(
+                    frame, save=False, imgsz=frame.shape[1],
+                    conf=conf_threshold, verbose=False
+                )[0]
+
+                # 5) callbacks + optional display
+                if len(res.boxes) > 0:
+                    annotated = res.plot()
+                    self.invokeOnResult(onResult, res, annotated, frame)
+                    disp = annotated
+                else:
+                    # pass raw frame to callback so recorders can use it
+                    self.invokeOnResult(onResult, None, None, frame)
+                    disp = frame
+
+                if show_video:
+                    cv2.imshow("Stream", disp)
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == 27:  # ESC
+                        try:
+                            self.sock.sendall(self.STOP_STREAM)
+                        except Exception:
+                            pass
+                        break
+        except Exception as e:
+            logging.exception(f"Stream reader failed: {e}")
+
+        finally:
+            # ensure cleanup
+            try:
+                if self.sock:
+                    self.sock.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            try:
+                if self.sock:
+                    self.sock.close()
+            except Exception:
+                pass
+            self.sock = None
+            if show_video:
+                try:
+                    cv2.destroyAllWindows()
+                except Exception:
+                    pass
+            if on_disconnect:
+                on_disconnect()
+
+    def close(self):
+        try:
+            if self.sock:
+                try:
+                    self.sock.sendall(self.STOP_STREAM)
+                except Exception:
+                    pass
+                self.sock.close()
+        finally:
+            self.sock = None
+            try:
+                cv2.destroyAllWindows()
+            except Exception:
+                pass
+
+

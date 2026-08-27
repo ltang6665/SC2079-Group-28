@@ -1,0 +1,168 @@
+# convert_tfrecords.py
+"""
+Windows script: YOLO -> TFRecord conversion only (CPU).
+Outputs:
+  runs/tensorflow/mdp_train.tfrecord
+  runs/tensorflow/mdp_valid.tfrecord
+
+Run (Windows):
+  python convert_tfrecords.py
+Optional:
+  python convert_tfrecords.py --data-yaml "SC2079 MDP 2024.v1i.yolov8/data.yaml" --overwrite
+"""
+
+import os
+import argparse
+from pathlib import Path
+
+import yaml
+import cv2
+import tensorflow as tf
+from tqdm import tqdm
+
+
+def bytesFeature(value: bytes) -> tf.train.Feature:
+    return tf.train.Feature(bytes_list=tf.train.BytesList(value=[value]))
+
+
+def int64Feature(value: int) -> tf.train.Feature:
+    return tf.train.Feature(int64_list=tf.train.Int64List(value=[int(value)]))
+
+
+def int64ListFeature(values) -> tf.train.Feature:
+    return tf.train.Feature(int64_list=tf.train.Int64List(value=[int(v) for v in values]))
+
+
+def floatListFeature(values) -> tf.train.Feature:
+    return tf.train.Feature(float_list=tf.train.FloatList(value=[float(v) for v in values]))
+
+
+class YOLOToTFRecord:
+    def __init__(self, data_yaml_path: str):
+        self.data_yaml_path = Path(data_yaml_path)
+        with open(self.data_yaml_path, "r", encoding="utf-8") as f:
+            self.cfg = yaml.safe_load(f)
+        self.base_path = self.data_yaml_path.parent
+
+    def dirs(self, split: str):
+        split = split.lower()
+        if split == "train":
+            return self.base_path / "train" / "images", self.base_path / "train" / "labels"
+        if split in ("valid", "val"):
+            return self.base_path / "valid" / "images", self.base_path / "valid" / "labels"
+        raise ValueError(f"Unknown split: {split}")
+
+    def convert(self, split: str, out_path: str, overwrite: bool = False) -> str:
+        os.makedirs(Path(out_path).parent, exist_ok=True)
+        if os.path.exists(out_path) and not overwrite:
+            print(f"✓ Exists, skip: {out_path}")
+            return out_path
+
+        img_dir, label_dir = self.dirs(split)
+        images = sorted(list(img_dir.glob("*.jpg")) + list(img_dir.glob("*.jpeg")) + list(img_dir.glob("*.png")))
+
+        print(f"\nConverting {len(images)} {split} images -> {out_path}")
+        with tf.io.TFRecordWriter(out_path) as w:
+            for img_path in tqdm(images):
+                label_path = label_dir / f"{img_path.stem}.txt"
+
+                encoded = img_path.read_bytes()
+                img = cv2.imread(str(img_path))
+                if img is None:
+                    continue
+                h, w0 = img.shape[:2]
+
+                xmins, ymins, xmaxs, ymaxs, classes = [], [], [], [], []
+                if label_path.exists():
+                    with open(label_path, "r", encoding="utf-8") as f:
+                        for line in f:
+                            parts = line.strip().split()
+                            if len(parts) < 5:
+                                continue
+
+                            cls = int(parts[0])
+                            vals = list(map(float, parts[1:]))
+
+                            # Case 1: normal YOLO bbox (x_center, y_center, w, h)
+                            if len(vals) == 4:
+                                x_center, y_center, bw, bh = vals
+                                xmin = x_center - bw / 2
+                                ymin = y_center - bh / 2
+                                xmax = x_center + bw / 2
+                                ymax = y_center + bh / 2
+
+                            # Case 2: YOLO segmentation (polygon)
+                            elif len(vals) >= 6 and len(vals) % 2 == 0:
+                                xs = vals[0::2]
+                                ys = vals[1::2]
+                                xmin = min(xs)
+                                ymin = min(ys)
+                                xmax = max(xs)
+                                ymax = max(ys)
+
+                            else:
+                                continue
+
+                            # clamp
+                            xmin = max(0.0, xmin)
+                            ymin = max(0.0, ymin)
+                            xmax = min(1.0, xmax)
+                            ymax = min(1.0, ymax)
+
+                            if xmax <= xmin or ymax <= ymin:
+                                continue
+
+                            xmins.append(xmin)
+                            ymins.append(ymin)
+                            xmaxs.append(xmax)
+                            ymaxs.append(ymax)
+                            classes.append(cls)
+
+
+                ex = tf.train.Example(
+                    features=tf.train.Features(
+                        feature={
+                            "image/encoded": bytesFeature(encoded),
+                            "image/height": int64Feature(h),
+                            "image/width": int64Feature(w0),
+                            "image/filename": bytesFeature(img_path.name.encode("utf-8")),
+                            "image/source_id": bytesFeature(img_path.stem.encode("utf-8")),
+                            "image/format": bytesFeature(
+                                b"jpeg" if img_path.suffix.lower() in [".jpg", ".jpeg"] else b"png"
+                            ),
+                            "image/object/bbox/xmin": floatListFeature(xmins),
+                            "image/object/bbox/ymin": floatListFeature(ymins),
+                            "image/object/bbox/xmax": floatListFeature(xmaxs),
+                            "image/object/bbox/ymax": floatListFeature(ymaxs),
+                            "image/object/class/label": int64ListFeature(classes),
+                        }
+                    )
+                )
+                w.write(ex.SerializeToString())
+
+        print(f"✓ Saved: {out_path}")
+        return out_path
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--data-yaml", default=r"SC2079 MDP 2024.v1i.yolov8/data.yaml")
+    ap.add_argument("--out-dir", default=r"runs/tensorflow")
+    ap.add_argument("--overwrite", action="store_true")
+    args = ap.parse_args()
+
+    conv = YOLOToTFRecord(args.data_yaml)
+
+    train_out = str(Path(args.out_dir) / "mdp_train.tfrecord")
+    val_out = str(Path(args.out_dir) / "mdp_valid.tfrecord")
+
+    conv.convert("train", train_out, overwrite=args.overwrite)
+    conv.convert("valid", val_out, overwrite=args.overwrite)
+
+    print("\nDone. Generated:")
+    print(f"  {train_out}")
+    print(f"  {val_out}")
+
+
+if __name__ == "__main__":
+    main()

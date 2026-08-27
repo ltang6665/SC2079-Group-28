@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="white">#FFFFFFFF</color>
+
+    <!-- Empire / Dark Side Theme (Tactical/Holo) -->
+    <color name="bg_dark">#050505</color> <!-- Pure Black -->
+    <color name="bg_card">#0A0A0A</color> <!-- Very Dark Grey -->
+    <color name="bg_card_light">#141414</color>
+    <color name="divider">#333333</color>
+
+    <!-- Holo Palette -->
+    <color name="neon_blue">#00EAFF</color>   <!-- Targeting Blue -->
+    <color name="neon_green">#00FF00</color>  <!-- Radar Green -->
+    <color name="neon_red">#FF0000</color>    <!-- Alert Red -->
+
+    <!-- Branding Colors -->
+    <color name="primary">#00EAFF</color>
+    <color name="primary_light">#80F4FF</color>
+    
+    <color name="secondary">#FF0000</color>
+    
+    <color name="accent">#FF9900</color>
+    
+    <color name="tertiary">#FF0000</color>
+
+    <!-- Text colors (High Contrast Tech) -->
+    <color name="text_primary">#E0E0E0</color>
+    <color name="text_secondary">#A0A0A0</color>
+    <color name="text_hint">#606060</color>
+    
+    <color name="status_success">#00FF00</color>
+
+
+    <!-- Canvas Specific Colors -->
+    <color name="grid_line">#33FFFFFF</color> <!-- Very translucent white -->
+    
+    <color name="obstacle_body">#333333</color>
+    <color name="obstacle_selected">#FFFFFF</color> 
+    <color name="obstacle_facing">#FFFF00</color> <!-- Bright Yellow for visibility -->
+    <color name="obstacle_shadow">#80000000</color>
+    
+    <color name="robot_body">#E0E0E0</color> <!-- Silver -->
+    <color name="robot_direction">#00FF00</color> <!-- Bright Green -->
+    <color name="robot_shadow">#80000000</color>
+
+    <color name="input_bg">#0A0A0A</color>
+</resources>

@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 34
+names: ['arrow-bullseye', 'bullseye-arrow', 'bullseye-arrow-bullseye', 'id11', 'id12', 'id13', 'id14', 'id15', 'id16', 'id17', 'id18', 'id19', 'id20', 'id21', 'id22', 'id23', 'id24', 'id25', 'id26', 'id27', 'id28', 'id29', 'id30', 'id31', 'id32', 'id33', 'id34', 'id35', 'id36', 'id37', 'id38', 'id39', 'id40', 'id99']
+
+roboflow:
+  workspace: 2526-grp20-multidiscproject
+  project: mdp-project-ff9bo-dkoly
+  version: 6
+  license: MIT
+  url: https://universe.roboflow.com/2526-grp20-multidiscproject/mdp-project-ff9bo-dkoly/dataset/6
