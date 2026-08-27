@@ -29,6 +29,7 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.Android_app">
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -39,6 +40,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Bluetooth page -->
+        <activity
+            android:name=".bluetooth.BluetoothActivity"
+            android:exported="false" />
+
     </application>
 
 </manifest>
