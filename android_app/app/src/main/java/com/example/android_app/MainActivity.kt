@@ -13,15 +13,18 @@ import android.content.Intent
 
 // import sub-packages
 import com.example.android_app.bluetooth.BluetoothActivity
+import com.example.android_app.arena.ArenaActivity
 
 class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContentView(R.layout.activity_main)
+
         val welcomeText = findViewById<TextView>(R.id.welcomeTextView)
         val startBtn = findViewById<Button>(R.id.startButton)
         val connectBtn = findViewById<Button>(R.id.connectBluetoothButton)
+
         //set app intro page to have fade in animation
         welcomeText.animate()
             .alpha(1f)
@@ -33,10 +36,14 @@ class MainActivity : AppCompatActivity() {
             }
             .start()
 
-        // on click of 'Connect to Device', navigate to new page
+        // on click of 'Connect to Device' or 'Get Started', navigate to new page
         connectBtn.setOnClickListener {
             val intent = Intent(this, BluetoothActivity::class.java)
             startActivity(intent)
+        }
+
+        startBtn.setOnClickListener {
+            startActivity(Intent(this, ArenaActivity::class.java))
         }
 
         ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.main)) { v, insets ->

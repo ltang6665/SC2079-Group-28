@@ -22,12 +22,17 @@ android {
         release {
             optimization {
                 enable = true //default is false
+                // isMinifyEnabled = false
             }
         }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17 //default version_11
         targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    buildFeatures {
+        viewBinding = true
     }
 }
 
@@ -40,4 +45,7 @@ dependencies {
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(libs.androidx.junit)
+    implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.recyclerview)
+    implementation(libs.kotlinx.coroutines.android)
 }

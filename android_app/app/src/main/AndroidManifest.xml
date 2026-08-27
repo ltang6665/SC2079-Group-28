@@ -17,7 +17,9 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
-    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" tools:targetApi="s" />
+
+    <uses-feature android:name="android.hardware.bluetooth" android:required="true" />
 
     <application
         android:usesCleartextTraffic="true"
@@ -44,7 +46,15 @@
         <!-- Bluetooth page -->
         <activity
             android:name=".bluetooth.BluetoothActivity"
-            android:exported="false" />
+            android:exported="false"
+            android:label="@string/title_bluetooth" />
+
+        <activity
+            android:name=".arena.ArenaActivity"
+            android:exported="false"
+            android:label="@string/title_arena"
+            android:screenOrientation="landscape"
+            tools:ignore="LockedOrientationActivity" />
 
     </application>
 
