@@ -1,0 +1,11 @@
+On your Raspberry Pi, update the SERIAL_PORT variable in your logger.py script to use the USB serial node instead:
+
+Python
+SERIAL_PORT = '/dev/ttyUSB0'
+(Note: Depending on how Linux enumerates the bridge chip, it might occasionally appear as /dev/ttyACM0 instead).
+
+To confirm the exact port name on your Pi while the USB cable is plugged in, run this command in your Pi's terminal:
+
+Bash
+ls /dev/ttyUSB* /dev/ttyACM*
+Whichever name appears in that list is the exact string you should put into your logger.py script.
