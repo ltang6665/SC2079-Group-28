@@ -7,6 +7,16 @@
     android:layout_height="match_parent"
     tools:context=".MainActivity">
 
+    <include
+        android:id="@+id/connectionStatusBar"
+        layout="@layout/connection_status_bar"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:alpha="0"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
     <TextView
         android:id="@+id/welcomeTextView"
         android:layout_width="wrap_content"
@@ -20,9 +30,9 @@
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintTop_toBottomOf="@+id/connectionStatusBar"
         app:layout_constraintVertical_chainStyle="packed"/>
-<!-- Main page has 2 primary functions: connect to bluetooth & start task-->
+    <!-- Main page has 2 primary functions: connect to bluetooth & start task-->
     <!-- bluetooth connection button -->
     <Button
         android:id="@+id/connectBluetoothButton"

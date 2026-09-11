@@ -19,10 +19,10 @@ object Protocol {
 
     // --- outbound ---
     fun obstacle(id: Int, x: Int, y: Int): String = "OBSTACLE,$id,$x,$y"
-    fun obstacleDeleted(id: Int): String = "OBSTACLE_DEL,$id"
-    fun face(id: Int, dir: Facing): String = "FACE,$id,${dir.code}"
+    fun obstacleDeleted(id: Int, x: Int, y: Int): String = "CLEAR,$id,$x,$y,-1"
+    fun face(id: Int, x: Int, y: Int, dir: Facing): String = "OBSTACLE,$id,$x,$y,${dir.value}"
     fun move(cmd: MoveCmd): String = "ROBOT_MOVE,${cmd.token}"
-    fun start(): String = "START"
+    fun start(): String = "BEGIN"
 
     enum class MoveCmd(val token: Char) {
         FORWARD('F'), BACKWARD('B'), LEFT('L'), RIGHT('R'), STOP('S')
@@ -52,7 +52,7 @@ object Protocol {
             parts.size == 4 && parts[0].equals("ROBOT", ignoreCase = true) -> {
                 val x = parts[1].toIntOrNull()
                 val y = parts[2].toIntOrNull()
-                val dir = Facing.fromCode(parts[3])
+                val dir = Facing.fromValue(parts[3])
                 if (x != null && y != null && dir != null) Inbound.Robot(x, y, dir)
                 else Inbound.Unknown(line)
             }

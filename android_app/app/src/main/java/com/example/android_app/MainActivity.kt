@@ -10,20 +10,28 @@ import androidx.core.view.WindowInsetsCompat
 import android.widget.TextView
 import android.widget.Button
 import android.content.Intent
+import android.view.View
+import android.content.res.ColorStateList
+import android.widget.ImageView
+import androidx.core.content.ContextCompat
 
 // import sub-packages
 import com.example.android_app.bluetooth.BluetoothActivity
 import com.example.android_app.arena.ArenaActivity
-
+import com.example.android_app.others.setupConnectionStatusBar
 class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContentView(R.layout.activity_main)
 
+        setupConnectionStatusBar()
+
         val welcomeText = findViewById<TextView>(R.id.welcomeTextView)
         val startBtn = findViewById<Button>(R.id.startButton)
         val connectBtn = findViewById<Button>(R.id.connectBluetoothButton)
+        val connectionStatusBar = findViewById<View>(R.id.connectionStatusBar)
+        connectionStatusBar.alpha = 0f
 
         //set app intro page to have fade in animation
         welcomeText.animate()
@@ -33,6 +41,7 @@ class MainActivity : AppCompatActivity() {
                 //fade in app options after intro
                 connectBtn.animate().alpha(1f).setDuration(800).start()
                 startBtn.animate().alpha(1f).setDuration(800).start()
+                connectionStatusBar.animate().alpha(1f).setDuration(800).start()
             }
             .start()
 

@@ -2,53 +2,72 @@ package com.example.android_app.arena
 
 import android.os.Bundle
 import android.text.format.DateFormat
+import android.util.Log
 import android.widget.Button
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import android.view.View
+import android.widget.ScrollView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.example.android_app.R
 import com.example.android_app.bluetooth.BluetoothService
 import com.example.android_app.bluetooth.Protocol
+import com.example.android_app.others.setupConnectionStatusBar
 import kotlinx.coroutines.launch
 
 class ArenaActivity : AppCompatActivity() {
 
     private lateinit var arena: ArenaView
     private lateinit var status: TextView
-    private lateinit var connectionBadge: TextView
+    private lateinit var statusScroll: ScrollView // for auto scrolling of status log
+
+    companion object {
+        private const val TAG = "ArenaActivity12345"
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_arena)
+        setupConnectionStatusBar()
 
         arena = findViewById(R.id.arenaView)
         status = findViewById(R.id.statusText)
-        connectionBadge = findViewById(R.id.connectionBadge)
+        statusScroll = findViewById(R.id.statusScroll)
 
         wireArenaCallbacks()
         wireControls()
-        observeService()
+        observeMessages()
 
         appendStatus(getString(R.string.status_ready))
     }
 
     private fun wireArenaCallbacks() {
         arena.onObstaclePlaced = { obs ->
-            BluetoothService.send(Protocol.obstacle(obs.id, obs.cellX, obs.cellY))
+            Log.d(TAG, "Callback [onObstaclePlaced]")
+            // BluetoothService.send(Protocol.obstacle(obs.id, obs.cellX, obs.cellY))
             appendStatus("Placed obstacle ${obs.id} at (${obs.cellX},${obs.cellY})")
+
         }
-        arena.onObstacleMoved = { obs ->
+
+        /*arena.onObstacleMoved = { obs ->
             BluetoothService.send(Protocol.obstacle(obs.id, obs.cellX, obs.cellY))
             appendStatus("Moved obstacle ${obs.id} to (${obs.cellX},${obs.cellY})")
+        }*/
+        arena.onObstacleDropped = { obs ->
+            Log.d(TAG, "Callback [onObstacleDropped]")
+            BluetoothService.send(Protocol.obstacle(obs.id, obs.cellX, obs.cellY))
+            appendStatus("Dropped obstacle ${obs.id} at (${obs.cellX},${obs.cellY})")
         }
         arena.onObstacleRemoved = { obs ->
-            BluetoothService.send(Protocol.obstacleDeleted(obs.id))
+            Log.d(TAG, "Callback [onObstacleRemoved]")
+            BluetoothService.send(Protocol.obstacleDeleted(obs.id, obs.cellX, obs.cellY))
             appendStatus("Removed obstacle ${obs.id}")
         }
         arena.onObstacleLongPress = { obs ->
+            Log.d(TAG, "Callback [onObstacleLongPress]")
             showFaceDialog(obs)
         }
     }
@@ -118,40 +137,15 @@ class ArenaActivity : AppCompatActivity() {
                 }
                 arena.setObstacleFace(obs.id, face)
                 if (face != null) {
-                    BluetoothService.send(Protocol.face(obs.id, face))
-                    appendStatus("Obstacle ${obs.id} face -> ${face.code}")
+                    // BluetoothService.send(Protocol.obstacle(obs.id, obs.cellX, obs.cellY))
+                    BluetoothService.send(Protocol.face(obs.id, obs.cellX, obs.cellY, face))
+                    appendStatus("Obstacle ${obs.id} face -> ${face.value}")
+                    Log.d(TAG, "Protocol.face(obs.id, face")
                 } else {
                     appendStatus("Obstacle ${obs.id} face cleared")
                 }
             }
             .show()
-    }
-
-    private fun observeService() {
-        lifecycleScope.launch {
-            repeatOnLifecycle(Lifecycle.State.STARTED) {
-                launch {
-                    BluetoothService.state.collect { state ->
-                        val name = BluetoothService.connectedDevice.value
-                        connectionBadge.text = when (state) {
-                            BluetoothService.State.DISCONNECTED ->
-                                getString(R.string.status_disconnected)
-                            BluetoothService.State.CONNECTING ->
-                                getString(R.string.status_connecting)
-                            BluetoothService.State.CONNECTED ->
-                                getString(R.string.status_connected, name ?: "device")
-                            BluetoothService.State.RECONNECTING ->
-                                getString(R.string.status_reconnecting)
-                        }
-                    }
-                }
-                launch {
-                    BluetoothService.messages.collect { line ->
-                        handleInbound(line)
-                    }
-                }
-            }
-        }
     }
 
     private fun handleInbound(line: String) {
@@ -164,7 +158,7 @@ class ArenaActivity : AppCompatActivity() {
                 arena.setRobot(msg.x, msg.y, msg.facing)
                 // C.4 note: selective log — pose updates are important events,
                 // not every raw stream byte.
-                appendStatus("Robot @ (${msg.x},${msg.y}) ${msg.facing.code}")
+                appendStatus("Robot @ (${msg.x},${msg.y}) ${msg.facing.value}")
             }
             is Protocol.Inbound.Unknown -> {
                 // Deliberately NOT logged to the visible status — checklist
@@ -179,5 +173,19 @@ class ArenaActivity : AppCompatActivity() {
         val trimmed = if (current.length > 4000) current.takeLast(2000) else current
         val line = "[$time] $msg"
         status.text = if (trimmed.isEmpty()) line else "$trimmed\n$line"
+
+        statusScroll.post {
+            statusScroll.smoothScrollTo(0, status.bottom)
+        }
+    }
+
+    private fun observeMessages() {
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                BluetoothService.messages.collect { line ->
+                    handleInbound(line)
+                }
+            }
+        }
     }
 }

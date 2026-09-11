@@ -1,22 +1,16 @@
 package com.example.android_app.arena
 
-/** Compass direction (also used for target-face annotation). */
-enum class Facing(val code: String) {
-    NORTH("N"),
-    EAST("E"),
-    SOUTH("S"),
-    WEST("W");
+/** Compass direction mapped to string representation for the Raspberry Pi. */
+enum class Facing(val value: String) {
+    NORTH("NORTH"),
+    EAST("EAST"),
+    SOUTH("SOUTH"),
+    WEST("WEST");
 
-    fun turnLeft(): Facing = values()[(ordinal + 3) % 4]
-    fun turnRight(): Facing = values()[(ordinal + 1) % 4]
+    fun turnLeft(): Facing = entries[(ordinal + 3) % 4]
+    fun turnRight(): Facing = entries[(ordinal + 1) % 4]
 
     companion object {
-        fun fromCode(s: String?): Facing? = when (s?.trim()?.uppercase()) {
-            "N", "NORTH" -> NORTH
-            "E", "EAST"  -> EAST
-            "S", "SOUTH" -> SOUTH
-            "W", "WEST"  -> WEST
-            else -> null
-        }
+        fun fromValue(value: String?): Facing? = entries.firstOrNull { it.value.equals(value, ignoreCase = true) }
     }
 }

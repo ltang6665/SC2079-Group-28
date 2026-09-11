@@ -3,18 +3,23 @@
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
 
-    <color name="grid_background">#101820</color>
+    <color name="grid_background">#FFFFFFFF</color>
     <color name="grid_line">#2E3C4A</color>
     <color name="grid_line_major">#4A6274</color>
-    <color name="start_zone">#264653</color>
+    <color name="start_zone">#7279D1</color> <!-- originally colour was #264653 -->
     <color name="obstacle">#1F2A38</color>
     <color name="obstacle_face">#F4A261</color>
     <color name="obstacle_face_marked">#E76F51</color>
     <color name="obstacle_target">#2A9D8F</color>
     <color name="obstacle_text">#FFFFFF</color>
-    <color name="robot_body">#4CC9F0</color>
+    <color name="robot_body">#7279D1</color>
     <color name="robot_facing">#F72585</color>
     <color name="status_bg">#12161C</color>
     <color name="status_text">#DDE1E4</color>
     <color name="accent">#4CC9F0</color>
+
+    <!-- Colours of bluetooth connection status-->
+    <color name="status_connected">#4CAF50</color>    <!-- Green -->
+    <color name="status_disconnected">#F44336</color> <!-- Red -->
+    <color name="status_connecting">#FFC107</color>   <!-- Amber -->
 </resources>

@@ -9,6 +9,9 @@ import android.util.AttributeSet
 import android.view.MotionEvent
 import android.view.View
 import androidx.core.content.ContextCompat
+import android.graphics.Bitmap
+import android.graphics.Matrix
+import androidx.core.graphics.drawable.toBitmap
 import com.example.android_app.R
 
 /**
@@ -19,6 +22,7 @@ import com.example.android_app.R
  * Callbacks:
  *   [onObstaclePlaced]     — new obstacle put on arena
  *   [onObstacleMoved]      — existing obstacle dragged
+ *   [onObstacleDropped]    — shift obstacle position
  *   [onObstacleRemoved]    — dragged outside arena
  *   [onObstacleLongPress]  — hosting activity opens the face-picker dialog
  */
@@ -31,15 +35,20 @@ class ArenaView @JvmOverloads constructor(
     companion object {
         const val COLS = 20
         const val ROWS = 20
-        // Start zone is a 3x3 in the bottom-left (checklist convention)
-        const val START_ZONE_SIZE = 3
+
+        // Start zone is a 4x4 in the bottom-left
+        const val START_ZONE_SIZE = 4
         private const val LONG_PRESS_MS = 400L
         private const val DRAG_SLOP_PX = 12f
     }
 
     // ── Public callbacks ──
     var onObstaclePlaced: ((Obstacle) -> Unit)? = null
-    var onObstacleMoved: ((Obstacle) -> Unit)? = null
+
+    // replace all move instructions with drop so as to prevent continuous transmission even when in the midst of moving
+    // var onObstacleMoved: ((Obstacle) -> Unit)? = null
+    var onObstacleDropped: ((Obstacle) -> Unit)? = null
+
     var onObstacleRemoved: ((Obstacle) -> Unit)? = null
     var onObstacleLongPress: ((Obstacle) -> Unit)? = null
 
@@ -47,6 +56,7 @@ class ArenaView @JvmOverloads constructor(
     private val obstacles = mutableListOf<Obstacle>()
     private var nextObstacleId = 1
     val robot: Robot = Robot(cellX = 1, cellY = 1, facing = Facing.NORTH)
+    private var robotBitmap: Bitmap? = null
 
     // ── Paints ──
     private val paintBg = Paint().apply { style = Paint.Style.FILL }
@@ -63,6 +73,11 @@ class ArenaView @JvmOverloads constructor(
     private val paintObstacleFace = Paint().apply { style = Paint.Style.FILL }
     private val paintObstacleTarget = Paint().apply { style = Paint.Style.FILL }
     private val paintObstacleText = Paint().apply {
+        style = Paint.Style.FILL
+        isAntiAlias = true
+        textAlign = Paint.Align.CENTER
+    }
+    private val paintAxisText = Paint().apply {
         style = Paint.Style.FILL
         isAntiAlias = true
         textAlign = Paint.Align.CENTER
@@ -100,6 +115,9 @@ class ArenaView @JvmOverloads constructor(
         paintObstacleText.color = ContextCompat.getColor(context, R.color.obstacle_text)
         paintRobotBody.color = ContextCompat.getColor(context, R.color.robot_body)
         paintRobotFacing.color = ContextCompat.getColor(context, R.color.robot_facing)
+        paintAxisText.color = ContextCompat.getColor(context, R.color.grid_line_major)
+        val drawable = ContextCompat.getDrawable(context, R.drawable.robot_car)
+        robotBitmap = drawable?.toBitmap()
     }
 
     // ── Public API ──
@@ -150,11 +168,14 @@ class ArenaView @JvmOverloads constructor(
     }
 
     private fun recomputeGeometry(w: Int, h: Int) {
-        val boardMax = minOf(w, h).toFloat() - 16f
+        val padding = 40f
+        val boardMax = minOf(w - padding, h - padding)
         cellSize = boardMax / COLS
-        boardLeft = (w - cellSize * COLS) / 2f
-        boardTop = (h - cellSize * ROWS) / 2f
+        boardLeft = (w - cellSize * COLS) / 2f + (padding / 4f)
+        boardTop = (h - cellSize * ROWS) / 2f - (padding / 4f)
+
         paintObstacleText.textSize = cellSize * 0.55f
+        paintAxisText.textSize = cellSize * 0.35f
     }
 
     private fun cellToRect(cellX: Int, cellY: Int): RectF {
@@ -180,6 +201,7 @@ class ArenaView @JvmOverloads constructor(
         super.onDraw(canvas)
         drawBackground(canvas)
         drawGrid(canvas)
+        drawAxisLabels(canvas)
         drawStartZone(canvas)
         drawObstacles(canvas)
         drawRobot(canvas)
@@ -207,8 +229,33 @@ class ArenaView @JvmOverloads constructor(
         }
     }
 
+    private fun drawAxisLabels(canvas: Canvas) {
+        val yOffset = cellSize * 0.25f
+
+        for (i in 0 until COLS) {
+            val cellRect = cellToRect(i, 0)
+
+            // X-axis numbers (0 to 19 along the bottom)
+            canvas.drawText(
+                i.toString(),
+                cellRect.centerX(),
+                boardTop + cellSize * ROWS + yOffset + paintAxisText.textSize,
+                paintAxisText
+            )
+
+            // Y-axis numbers (0 to 19 along the left)
+            val yCellRect = cellToRect(0, i)
+            canvas.drawText(
+                i.toString(),
+                boardLeft - yOffset - (paintAxisText.textSize / 2f),
+                yCellRect.centerY() + (paintAxisText.textSize / 3f),
+                paintAxisText
+            )
+        }
+    }
+
     private fun drawStartZone(canvas: Canvas) {
-        // 3x3 bottom-left
+        // 4x4 bottom-left
         val rect = RectF(
             boardLeft,
             boardTop + cellSize * (ROWS - START_ZONE_SIZE),
@@ -234,8 +281,8 @@ class ArenaView @JvmOverloads constructor(
         val faceRect = when (face) {
             Facing.NORTH -> RectF(rect.left, rect.top, rect.right, rect.top + thickness)
             Facing.SOUTH -> RectF(rect.left, rect.bottom - thickness, rect.right, rect.bottom)
-            Facing.EAST  -> RectF(rect.right - thickness, rect.top, rect.right, rect.bottom)
-            Facing.WEST  -> RectF(rect.left, rect.top, rect.left + thickness, rect.bottom)
+            Facing.EAST -> RectF(rect.right - thickness, rect.top, rect.right, rect.bottom)
+            Facing.WEST -> RectF(rect.left, rect.top, rect.left + thickness, rect.bottom)
         }
         canvas.drawRect(faceRect, paintObstacleFace)
     }
@@ -269,16 +316,19 @@ class ArenaView @JvmOverloads constructor(
                 baseA = PointF(cx - r * 0.6f, cy + r * 0.4f)
                 baseB = PointF(cx + r * 0.6f, cy + r * 0.4f)
             }
+
             Facing.SOUTH -> {
                 tip = PointF(cx, cy + r)
                 baseA = PointF(cx - r * 0.6f, cy - r * 0.4f)
                 baseB = PointF(cx + r * 0.6f, cy - r * 0.4f)
             }
+
             Facing.EAST -> {
                 tip = PointF(cx + r, cy)
                 baseA = PointF(cx - r * 0.4f, cy - r * 0.6f)
                 baseB = PointF(cx - r * 0.4f, cy + r * 0.6f)
             }
+
             Facing.WEST -> {
                 tip = PointF(cx - r, cy)
                 baseA = PointF(cx + r * 0.4f, cy - r * 0.6f)
@@ -292,6 +342,31 @@ class ArenaView @JvmOverloads constructor(
             close()
         }
         canvas.drawPath(path, paintRobotFacing)
+
+        /* val bmp = robotBitmap
+        if (bmp != null) {
+            val rotationDegrees = when (robot.facing) {
+                Facing.NORTH -> 0f
+                Facing.EAST  -> 90f
+                Facing.SOUTH -> 180f
+                Facing.WEST  -> 270f
+            }
+
+            val matrix = Matrix().apply {
+                // 1. Rotate around the unscaled bitmap's center point
+                postRotate(rotationDegrees, bmp.width / 2f, bmp.height / 2f)
+
+                // 2. Scale the rotated bitmap to match the 3x3 grid size
+                postScale(body.width() / bmp.width, body.height() / bmp.height)
+
+                // 3. Move the bitmap into position on the canvas
+                postTranslate(body.left, body.top)
+            }
+
+            canvas.drawBitmap(bmp, matrix, null)
+        } else {
+            canvas.drawRect(body, paintRobotBody)
+        }*/
     }
 
     // ── Touch ──
@@ -301,7 +376,6 @@ class ArenaView @JvmOverloads constructor(
             MotionEvent.ACTION_DOWN -> {
                 pressDownX = event.x
                 pressDownY = event.y
-                pressDownAt = System.currentTimeMillis()
                 didDrag = false
                 pressedObstacle = obstacleAt(event.x, event.y)
                 draggingObstacle = pressedObstacle
@@ -310,6 +384,7 @@ class ArenaView @JvmOverloads constructor(
                 }
                 return true
             }
+
             MotionEvent.ACTION_MOVE -> {
                 val dx = event.x - pressDownX
                 val dy = event.y - pressDownY
@@ -319,39 +394,45 @@ class ArenaView @JvmOverloads constructor(
                 }
                 val dragging = draggingObstacle ?: return true
                 val cell = screenToCell(event.x, event.y)
-                if (cell != null) {
+
+                // Update UI locally (no network transmission)
+                if (cell != null && (dragging.cellX != cell.first || dragging.cellY != cell.second)) {
                     dragging.cellX = cell.first
                     dragging.cellY = cell.second
                     invalidate()
                 }
                 return true
             }
+
             MotionEvent.ACTION_UP -> {
                 removeCallbacks(longPressRunnable)
                 val dragging = draggingObstacle
                 val cell = screenToCell(event.x, event.y)
+
                 if (dragging != null) {
                     if (cell == null) {
-                        // Dragged outside the arena → delete
+                        // Dragged outside -> delete
                         obstacles.remove(dragging)
                         onObstacleRemoved?.invoke(dragging)
                     } else if (didDrag) {
+                        // Drop finished -> transmit final position to RPi
                         dragging.cellX = cell.first
                         dragging.cellY = cell.second
-                        onObstacleMoved?.invoke(dragging)
+                        onObstacleDropped?.invoke(dragging)
                     }
-                    // Short tap (no drag) on empty area handled below.
                 } else if (cell != null && !didDrag) {
-                    // Tap on empty cell → place a new obstacle
+                    // Tap on empty cell -> place new obstacle
                     val obs = Obstacle(nextObstacleId++, cell.first, cell.second)
                     obstacles.add(obs)
                     onObstaclePlaced?.invoke(obs)
                 }
+
                 invalidate()
                 draggingObstacle = null
                 pressedObstacle = null
                 return true
             }
+
             MotionEvent.ACTION_CANCEL -> {
                 removeCallbacks(longPressRunnable)
                 draggingObstacle = null
