@@ -2278,6 +2278,8 @@ void motorTask(void const *argument)
 
       // Combined error for motor correction
       int32_t err = speed_err + gyro_err;
+    //  int32_t err = speed_err ;
+
       i_acc += err; // <- no anti-windup: integrate always
       // lets add anti wind up
       //          const int32_t IACC_CLAMP = 25000;
@@ -2289,17 +2291,32 @@ void motorTask(void const *argument)
 
       float off_f = Kp * (float)err + Ki * (float)i_acc + Kd * (float)d;
       int off = (int)off_f;
+      //int off = 0;
 
       // --- Base speed (allow a manual global scale later if you add it) ---
       int base = PWM_RUN;
 
       // --- Steering profile (no angle math) ---
       float scaleL = 1.0f, scaleR = 1.0f;
-      int base_turn = base;
+      int base_L = (int)(base*0.92);
+      int base_R = base;
 
       // --- Apply PID offset (if any) and steering scales ---
-      int lDuty = (int)((base_turn - off) * scaleL);
-      int rDuty = (int)((base_turn + off) * scaleR);
+     // int lDuty = PWM_RUN;
+//      int lDuty = 4000;
+//      int rDuty = PWM_RUN;
+        int lDuty, rDuty;
+
+		if (uart_cmd == CMD_FORWARD) {
+			// In forward, adding 'off' increases the duty variable, slowing the left motor down.
+			lDuty = (int)((base_L + off) * scaleL);
+			rDuty = (int)((base_R - off) * scaleR);
+		} else {
+			// In reverse, the negative velocities mean 'off' is naturally inverted,
+			// so the original subtraction logic provides the correct negative feedback.
+			lDuty = (int)((base_L - off) * scaleL);
+			rDuty = (int)((base_R + off) * scaleR);
+		}
 
       // GYRO
       error_angle = arc_target_angle - total_angle;
@@ -2432,6 +2449,7 @@ void motorTask(void const *argument)
               set_servo_center_afterright();
             }
 
+
             if (slide_mode == SLIDE_LEFT)
             {
               set_servo_center_afterleft();
@@ -2488,7 +2506,9 @@ void motorTask(void const *argument)
       else
       { // no servoslide mode
         // no slide: normal straight correction
-        htim12.Instance->CCR2 = servo;
+       //   htim12.Instance->CCR2 = servo;
+    	htim12.Instance->CCR2 = SERVO_CENTER_CCR;
+
       }
 
       //			htim12.Instance->CCR2 = servo;
@@ -2499,7 +2519,9 @@ void motorTask(void const *argument)
         __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, lDuty);
         __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, PWM_MAX);
         // Right motor (TIM9: CH1=IN2, CH2=IN1)
-        __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_1, rDuty * 0.95); // 0.930
+      //  __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_1, rDuty * 0.94); // 0.930
+        __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_1, rDuty); //test
+
         __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_2, PWM_MAX);
       }
       else if (uart_cmd == CMD_REVERSE)
@@ -2507,7 +2529,9 @@ void motorTask(void const *argument)
         __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, PWM_MAX);
         __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, lDuty);
         __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_1, PWM_MAX);
-        __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_2, rDuty * 1.03); // 0.940
+       // __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_2, rDuty * 1.025); // 0.940
+        __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_2, rDuty); // test
+
       }
 
       break;
@@ -2780,19 +2804,39 @@ void encoderTask(void const *argument)
 
   for (;;)
   {
-    if ((HAL_GetTick() - last_tick) >= 1000U) // 1 s window
-    {
-      // ---- Encoder A (TIM2) ----
-      uint16_t now_a = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
-      delta_a = (int16_t)(now_a - last_a); // signed, wrap-safe
-      last_a = now_a;
+	  if ((HAL_GetTick() - last_tick) >= 20U) // Changed to 20 ms window (50 Hz)
+		  {
+			// ---- Encoder A (TIM2) ----
+			uint16_t now_a = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
+			delta_a = (int16_t)(now_a - last_a);
+			last_a = now_a;
 
-      // ---- Encoder B (TIM3) ----
-      uint16_t now_b = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
-      delta_b = (int16_t)(now_b - last_b); // signed, wrap-safe
-      delta_b = -delta_b;
-      last_b = now_b;
-      last_tick += 1000U;
+			// ---- Encoder B (TIM3) ----
+			uint16_t now_b = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
+			delta_b = (int16_t)(now_b - last_b);
+			delta_b = -delta_b;
+			last_b = now_b;
+
+			last_tick += 20U; // Update tick
+
+			// Uncomment and modify UART transmission[cite: 6]
+			char buf[32];
+			int n = snprintf(buf, sizeof(buf), "%d,%d\n", (int)delta_a, (int)delta_b);
+			HAL_UART_Transmit(&huart3, (uint8_t*)buf, (uint16_t)n, 5);
+		  }
+//    if ((HAL_GetTick() - last_tick) >= 1000U) // 1 s window
+//    {
+//      // ---- Encoder A (TIM2) ----
+//      uint16_t now_a = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
+//      delta_a = (int16_t)(now_a - last_a); // signed, wrap-safe
+//      last_a = now_a;
+//
+//      // ---- Encoder B (TIM3) ----
+//      uint16_t now_b = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
+//      delta_b = (int16_t)(now_b - last_b); // signed, wrap-safe
+//      delta_b = -delta_b;
+//      last_b = now_b;
+//      last_tick += 1000U;
 
       //                // if you only want magnitude of counts in 1s: no direction
       //                int16_t speed_cps = (delta >= 0) ? delta : -delta; // counts per second
@@ -2802,12 +2846,11 @@ void encoderTask(void const *argument)
       //                char buf[32];
       //                int n = snprintf(buf, sizeof(buf), "%ld,%ld\n", (int)delta_a, (long)delta_b);
       //				HAL_UART_Transmit(&huart3, (uint8_t*)buf, (uint16_t)n, 5);
-    }
+
     osDelay(1);
   }
   /* USER CODE END encoderTask */
 }
-
 /* USER CODE BEGIN Header_gyroTask */
 /**
  * @brief Function implementing the Gyro_Task thread.
@@ -3088,6 +3131,7 @@ void Error_Handler(void)
   }
   /* USER CODE END Error_Handler_Debug */
 }
+
 #ifdef USE_FULL_ASSERT
 /**
  * @brief  Reports the name of the source file and the source line number
