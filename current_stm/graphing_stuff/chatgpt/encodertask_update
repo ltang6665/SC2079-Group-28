@@ -1,0 +1,92 @@
+
+volatile uint8_t uart1_tx_busy = 0;
+
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+  if (huart->Instance == USART3)
+    uart3_tx_busy = 0;
+  if (huart->Instance == USART1)
+    uart1_tx_busy = 0;
+}
+
+static void send_encoder_sample(int16_t a, int16_t b)
+{
+    static char buf[32];
+
+    // Skip frame if USART1 is currently transmitting
+    if (uart1_tx_busy)
+        return;
+
+    uint32_t tick = HAL_GetTick();
+
+    int n = snprintf(
+        buf,
+        sizeof(buf),
+        "E,%lu,%d,%d\n",
+        (unsigned long)tick,
+        (int)a,
+        (int)b
+    );
+
+    if (n <= 0 || n >= (int)sizeof(buf))
+        return;
+
+    uart1_tx_busy = 1;
+
+    // Transmit over huart1 instead of huart3
+    if (HAL_UART_Transmit_IT(&huart1, (uint8_t *)buf, (uint16_t)n) != HAL_OK)
+    {
+        uart1_tx_busy = 0;
+    }
+}
+
+
+
+
+
+/* USER CODE BEGIN Header_encoderTask */
+/**
+ * @brief Function implementing the Encoder_Task thread.
+ * @param argument: Not used
+ * @retval None
+ */
+/* USER CODE END Header_encoderTask */
+void encoderTask(void const *argument)
+{
+  /* USER CODE BEGIN encoderTask */
+  HAL_TIM_Encoder_Start(&htim2, TIM_CHANNEL_ALL); // encoder a
+  HAL_TIM_Encoder_Start(&htim3, TIM_CHANNEL_ALL); // encoder b
+
+  uint16_t last_a = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
+  uint16_t last_b = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
+  uint32_t last_tick = HAL_GetTick();
+
+  for (;;)
+  {
+    if ((HAL_GetTick() - last_tick) >= 20U) // 20 ms window (50 Hz)
+    {
+      // ---- Encoder A (TIM2) ----
+      uint16_t now_a = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
+      int16_t new_delta_a = (int16_t)(now_a - last_a);
+      last_a = now_a;
+
+      // ---- Encoder B (TIM3) ----
+      uint16_t now_b = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
+      int16_t new_delta_b = (int16_t)(now_b - last_b);
+      new_delta_b = -new_delta_b;
+      last_b = now_b;
+
+      // Update global variables for the rest of the robot software
+      delta_a = new_delta_a;
+      delta_b = new_delta_b;
+
+      last_tick += 20U;
+
+      // Non-blocking UART transmission with timestamp & packet header
+      send_encoder_sample(new_delta_a, new_delta_b);
+    }
+
+    osDelay(1);
+  }
+  /* USER CODE END encoderTask */
+}
