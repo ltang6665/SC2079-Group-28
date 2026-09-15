@@ -256,12 +256,12 @@ volatile turn_t cmd_turn = TURN_NONE;
 //    htim12.Instance->CCR2 = 120; // half left
 //    osDelay(3000);
 //    htim12.Instance->CCR2 = 100; // extreme left
-#define SERVO_CENTER_CCR 154            // straight (you already use ~152) /155
-#define SERVO_CENTER_AFTERLEFT_CCR 154  // 161
-#define SERVO_CENTER_AFTERRIGHT_CCR 154 // 148
-#define SERVO_RIGHT_CCR 250             // <-- set to your "forward-right" CCR
-#define SERVO_LEFT_CCR 107              // <-- set to your "forward-left"  CCR
-#define SERVO_REVERSE_LEFT_CCR 107      // 112
+#define SERVO_CENTER_CCR 157            // straight (you already use ~152) /155
+#define SERVO_CENTER_AFTERLEFT_CCR 160  // 161, 154 luther
+#define SERVO_CENTER_AFTERRIGHT_CCR 157 // 148
+#define SERVO_RIGHT_CCR 250             // <-- set to your "forward-right" CCR 250
+#define SERVO_LEFT_CCR 100              // <-- set to your "forward-left"  CCR 107
+#define SERVO_REVERSE_LEFT_CCR 100      // 112
 #define SERVO_REVERSE_RIGHT_CCR 250
 
 // Optional: slow overall speed while turning to keep traction (0..1)
@@ -2026,7 +2026,7 @@ void oledTask(void const * argument)
     if (display_page == 0)
     {
       // --- PAGE 0: Yaw, Target, Speeds, and CMD ---
-      snprintf(line, sizeof(line), "Yaw: %-11d", (int)total_angle);
+      snprintf(line, sizeof(line), "Yaww: %-11d", (int)total_angle);
       OLED_ShowString(0, 0, (uint8_t *)line);
 
       snprintf(line, sizeof(line), "Tgt: %-11d", (int)arc_target_angle);
@@ -2060,7 +2060,7 @@ void oledTask(void const * argument)
     }
 
     OLED_Refresh_Gram();
-    osDelay(20);
+    osDelay(20); //was 100
   }
   /* USER CODE END oledTask */
 }
@@ -2409,7 +2409,7 @@ void motorTask(void const * argument)
 
       // --- Steering profile (no angle math) ---
       float scaleL = 1.0f, scaleR = 1.0f;
-      int base_L = (int)(base*0.92);
+      int base_L = (int)(base*1.14); //luther
       int base_R = base;
 
       // --- Apply PID offset (if any) and steering scales ---
@@ -2617,8 +2617,8 @@ void motorTask(void const * argument)
       else
       { // no servoslide mode
         // no slide: normal straight correction
-       //   htim12.Instance->CCR2 = servo;
-    	htim12.Instance->CCR2 = SERVO_CENTER_CCR;
+        htim12.Instance->CCR2 = servo;
+    	//htim12.Instance->CCR2 = SERVO_CENTER_CCR; luther
 
       }
 
@@ -2713,6 +2713,8 @@ void motorTask(void const * argument)
       {
         // turning right: left = outer (drive), right = inner (coast)
 
+    	// luther
+
         // --- Outer wheel speed schedule (slow down near target to avoid overshoot) ---
         int outer = ARC_BASE_PWM;
         if (aerr < 45.0)
@@ -2721,7 +2723,7 @@ void motorTask(void const * argument)
           outer = (int)(1.00f * ARC_BASE_PWM); // 1.1
         if (outer > ARC_MIN_DUTY)
           outer = ARC_MIN_DUTY;
-        left_forward_duty(outer * 1.07); // 1.07, 1.00
+        //left_forward_duty(outer * 1.07); // 1.07, 1.00
 
         // --- Inner wheel behaviour
         int inner = (int)(outer * RIGHT_TURN_INNER_SCALE);

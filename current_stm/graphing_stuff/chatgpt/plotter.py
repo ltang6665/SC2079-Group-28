@@ -88,7 +88,10 @@ def load_log(filename):
     return data
 
 
-def plot_command(command_id, command_data):
+def plot_command(
+    command_id,
+    command_data
+):
 
     times = command_data["time"]
     a_delta = command_data["a"]
@@ -98,9 +101,9 @@ def plot_command(command_id, command_data):
     if len(times) < 2:
         return
 
-    # ==============================
+    # ==========================================
     # Relative command time
-    # ==============================
+    # ==========================================
 
     t0 = times[0]
 
@@ -109,10 +112,11 @@ def plot_command(command_id, command_data):
         for t in times
     ]
 
-    # ==============================
-    # Convert encoder delta
-    # counts/20ms -> counts/second
-    # ==============================
+    # ==========================================
+    # Convert encoder delta to speed
+    #
+    # counts / 20 ms -> counts / second
+    # ==========================================
 
     a_speed = [
         value / SAMPLE_PERIOD
@@ -124,10 +128,9 @@ def plot_command(command_id, command_data):
         for value in b_delta
     ]
 
-    # ==============================
-    # Acceleration
-    # counts/s -> counts/s^2
-    # ==============================
+    # ==========================================
+    # Calculate acceleration
+    # ==========================================
 
     a_accel = [0.0]
     b_accel = [0.0]
@@ -149,80 +152,98 @@ def plot_command(command_id, command_data):
             / dt
         )
 
-    # ==============================
+    # ==========================================
+    # ONE WINDOW FOR THIS COMMAND
+    # ==========================================
+
+    fig, (ax_speed, ax_accel) = plt.subplots(
+        2,
+        1,
+        figsize=(10, 8)
+    )
+
+    # Set actual Windows window title
+    manager = fig.canvas.manager
+
+    if manager is not None:
+        manager.set_window_title(
+            f"Command {command_id}: {command}"
+        )
+
+    # Main title for whole window
+    fig.suptitle(
+        f"Command {command_id}: {command}",
+        fontsize=14
+    )
+
+    # ==========================================
     # SPEED GRAPH
-    # ==============================
+    # ==========================================
 
-    plt.figure(figsize=(10, 5))
-
-    plt.plot(
+    ax_speed.plot(
         relative_time,
         a_speed,
-        label="Motor A (Left)"
+        label="Motor A (Left)",
+        linewidth=2
     )
 
-    plt.plot(
+    ax_speed.plot(
         relative_time,
         b_speed,
-        label="Motor B (Right)"
+        label="Motor B (Right)",
+        linewidth=2
     )
 
-    plt.title(
-        f"Command {command_id}: {command}\n"
+    ax_speed.set_title(
         "Wheel Speed"
     )
 
-    plt.xlabel(
+    ax_speed.set_xlabel(
         "Time since command start (s)"
     )
 
-    plt.ylabel(
+    ax_speed.set_ylabel(
         "Encoder counts / second"
     )
 
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
+    ax_speed.legend()
+    ax_speed.grid(True)
 
-    plt.show()
-
-    # ==============================
+    # ==========================================
     # ACCELERATION GRAPH
-    # ==============================
+    # ==========================================
 
-    plt.figure(figsize=(10, 5))
-
-    plt.plot(
+    ax_accel.plot(
         relative_time,
         a_accel,
-        label="Motor A acceleration"
+        label="Motor A acceleration",
+        linewidth=2
     )
 
-    plt.plot(
+    ax_accel.plot(
         relative_time,
         b_accel,
-        label="Motor B acceleration"
+        label="Motor B acceleration",
+        linewidth=2
     )
 
-    plt.title(
-        f"Command {command_id}: {command}\n"
+    ax_accel.set_title(
         "Wheel Acceleration"
     )
 
-    plt.xlabel(
+    ax_accel.set_xlabel(
         "Time since command start (s)"
     )
 
-    plt.ylabel(
+    ax_accel.set_ylabel(
         "Encoder acceleration (counts/s²)"
     )
 
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
+    ax_accel.legend()
+    ax_accel.grid(True)
 
-    plt.show()
-
+    # Prevent graphs/titles overlapping
+    fig.tight_layout()
 
 def main():
 
@@ -271,6 +292,9 @@ def main():
             command_id,
             data[command_id]
         )
+        
+    plt.show()
+
 
 
 if __name__ == "__main__":

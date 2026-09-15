@@ -52,8 +52,8 @@
 ../Core/Src/main.c:1982:6:ledTask	1
 ../Core/Src/main.c:2006:6:oledTask	5
 ../Core/Src/main.c:2075:6:motorTask	107
-../Core/Src/main.c:2905:6:encoderTask	3
-../Core/Src/main.c:2979:6:gyroTask	3
-../Core/Src/main.c:3092:6:ultrasoundTask	2
-../Core/Src/main.c:3123:6:irTask	1
-../Core/Src/main.c:3170:6:Error_Handler	1
+../Core/Src/main.c:2907:6:encoderTask	3
+../Core/Src/main.c:2981:6:gyroTask	3
+../Core/Src/main.c:3094:6:ultrasoundTask	2
+../Core/Src/main.c:3125:6:irTask	1
+../Core/Src/main.c:3172:6:Error_Handler	1
