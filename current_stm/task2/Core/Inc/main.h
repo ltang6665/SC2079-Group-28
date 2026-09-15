@@ -67,6 +67,8 @@ void Error_Handler(void);
 #define IR_L_GPIO_Port GPIOC
 #define IR_R_Pin GPIO_PIN_1
 #define IR_R_GPIO_Port GPIOC
+#define USART2_RX_Pin GPIO_PIN_3
+#define USART2_RX_GPIO_Port GPIOA
 #define LED3_Pin GPIO_PIN_8
 #define LED3_GPIO_Port GPIOE
 #define SERVO_PWM_Pin GPIO_PIN_15

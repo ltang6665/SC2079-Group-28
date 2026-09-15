@@ -1,85 +1,155 @@
+import csv
 import serial
 import time
-import csv
+from datetime import datetime
+from pathlib import Path
 
-SERIAL_PORT = '/dev/serial0'
+
+SERIAL_PORT = "/dev/serial0"
 BAUD_RATE = 115200
-RECORD_TIME = 2.5
 
 
-def main():
-    print(f"Connecting to STM32 on {SERIAL_PORT}...")
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    ser = serial.Serial(
-        SERIAL_PORT,
-        BAUD_RATE,
-        timeout=0.1
-    )
+output_file = Path(
+    f"robot_telemetry_{timestamp}.csv"
+)
 
-    time.sleep(1)
 
-    # Remove old messages already sitting in the RX buffer
-    ser.reset_input_buffer()
+ser = serial.Serial(
+    SERIAL_PORT,
+    BAUD_RATE,
+    timeout=1
+)
 
-    print("Triggering f1000...")
-    ser.write(b'f1000\n')
 
-    start_time = time.time()
+with output_file.open(
+    "w",
+    newline=""
+) as f:
 
-    data_log = []
+    writer = csv.writer(f)
 
-    print(f"Recording data for {RECORD_TIME} seconds...")
-
-    while time.time() - start_time < RECORD_TIME:
-
-        line = (
-            ser.readline()
-            .decode('utf-8', errors='ignore')
-            .strip()
-        )
-
-        # Only process encoder packets
-        if not line.startswith("E,"):
-            continue
-
-        try:
-            _, stm_tick, a, b = line.split(',')
-
-            data_log.append([
-                int(stm_tick) / 1000.0,
-                int(a),
-                int(b)
-            ])
-
-        except ValueError:
-            pass
-
-    # Stop robot
-    ser.write(b's\n')
-
-    time.sleep(0.1)
-
-    ser.close()
-
-    filename = 'motor_log.csv'
-
-    with open(filename, 'w', newline='') as f:
-
-        writer = csv.writer(f)
-
-        writer.writerow([
-            'Time_s',
-            'Motor_A',
-            'Motor_B'
-        ])
-
-        writer.writerows(data_log)
+    writer.writerow([
+        "host_time",
+        "record_type",
+        "stm_tick_ms",
+        "command_id",
+        "command",
+        "motor_a_delta",
+        "motor_b_delta"
+    ])
 
     print(
-        f"Done! Saved {len(data_log)} samples "
-        f"to {filename}"
+        f"Logging telemetry to {output_file}"
     )
 
+    print(
+        "Press Ctrl+C to stop."
+    )
 
-if __name__ == '__main__':
-    main()
+    try:
+
+        while True:
+
+            raw = ser.readline()
+
+            if not raw:
+                continue
+
+            try:
+                line = raw.decode(
+                    "ascii",
+                    errors="strict"
+                ).strip()
+
+            except UnicodeDecodeError:
+                continue
+
+            if not line:
+                continue
+
+            print(line)
+
+            parts = line.split(",")
+
+            host_time = time.time()
+
+
+            # ---------------------------------
+            # CMD
+            #
+            # CMD,id,tick,command
+            # ---------------------------------
+
+            if (
+                len(parts) == 4
+                and parts[0] == "CMD"
+            ):
+
+                try:
+
+                    command_id = int(parts[1])
+                    stm_tick = int(parts[2])
+                    command = parts[3]
+
+                except ValueError:
+                    continue
+
+                writer.writerow([
+                    host_time,
+                    "CMD",
+                    stm_tick,
+                    command_id,
+                    command,
+                    "",
+                    ""
+                ])
+
+                f.flush()
+
+
+            # ---------------------------------
+            # ENC
+            #
+            # ENC,tick,id,a,b
+            # ---------------------------------
+
+            elif (
+                len(parts) == 5
+                and parts[0] == "ENC"
+            ):
+
+                try:
+
+                    stm_tick = int(parts[1])
+                    command_id = int(parts[2])
+                    motor_a = int(parts[3])
+                    motor_b = int(parts[4])
+
+                except ValueError:
+                    continue
+
+                writer.writerow([
+                    host_time,
+                    "ENC",
+                    stm_tick,
+                    command_id,
+                    "",
+                    motor_a,
+                    motor_b
+                ])
+
+                f.flush()
+
+
+    except KeyboardInterrupt:
+
+        print("\nLogging stopped.")
+
+
+ser.close()
+
+print(
+    f"Saved: {output_file}"
+)

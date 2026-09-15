@@ -23,6 +23,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "oled.h"
+#include "telemetry.h"
 #include "stdbool.h"
 #include <string.h>
 #include <stdlib.h>
@@ -58,6 +59,7 @@ TIM_HandleTypeDef htim8;
 TIM_HandleTypeDef htim9;
 TIM_HandleTypeDef htim12;
 
+UART_HandleTypeDef huart2;
 UART_HandleTypeDef huart3;
 
 osThreadId LED_TaskHandle;
@@ -390,13 +392,14 @@ static void MX_TIM12_Init(void);
 static void MX_I2C2_Init(void);
 static void MX_TIM8_Init(void);
 static void MX_ADC1_Init(void);
-void ledTask(void const *argument);
-void oledTask(void const *argument);
-void motorTask(void const *argument);
-void encoderTask(void const *argument);
-void gyroTask(void const *argument);
-void ultrasoundTask(void const *argument);
-void irTask(void const *argument);
+static void MX_USART2_UART_Init(void);
+void ledTask(void const * argument);
+void oledTask(void const * argument);
+void motorTask(void const * argument);
+void encoderTask(void const * argument);
+void gyroTask(void const * argument);
+void ultrasoundTask(void const * argument);
+void irTask(void const * argument);
 
 /* USER CODE BEGIN PFP */
 
@@ -710,12 +713,73 @@ static void parse_and_enqueue_script(char *line)
   (void)cmdq_push(eos);
 }
 
+static const char *telemetry_name_for_cmd(script_cmd_t type)
+{
+    switch (type)
+    {
+    case SCMD_FWD_CM:
+        return "FWD_CM";
+
+    case SCMD_REV_CM:
+        return "REV_CM";
+
+    case SCMD_ARC_FR:
+        return "ARC_FR";
+
+    case SCMD_ARC_FL:
+        return "ARC_FL";
+
+    case SCMD_ARC_RR:
+        return "ARC_RR";
+
+    case SCMD_ARC_RL:
+        return "ARC_RL";
+
+    case SCMD_SLIDE_R:
+        return "SLIDE_R";
+
+    case SCMD_SLIDE_L:
+        return "SLIDE_L";
+
+    case SCMD_STOP:
+        return "STOP";
+
+    case SCMD_FIR:
+        return "FIR";
+
+    case SCMD_FIL:
+        return "FIL";
+
+    case SCMD_FIRO:
+        return "FIRO";
+
+    case SCMD_FILO:
+        return "FILO";
+
+    case SCMD_FU:
+        return "FU";
+
+    case SCMD_FX:
+        return "FX";
+
+    default:
+        return NULL;
+    }
+}
+
 // pop from queue and set all the variables needed, then change the uart_cmd
 static int start_next_from_queue(void)
 {
   script_item_t it;
   if (!cmdq_pop(&it))
     return 0;
+
+  const char *telemetry_name = telemetry_name_for_cmd(it.type);
+
+  if (telemetry_name != NULL)
+  {
+      Telemetry_StartCommand(telemetry_name, it.value);
+  }
 
   switch (it.type)
   {
@@ -974,9 +1038,9 @@ float Voltage_To_Distance_CM(float v) {
 /* USER CODE END 0 */
 
 /**
- * @brief  The application entry point.
- * @retval int
- */
+  * @brief  The application entry point.
+  * @retval int
+  */
 int main(void)
 {
 
@@ -1012,8 +1076,11 @@ int main(void)
   MX_I2C2_Init();
   MX_TIM8_Init();
   MX_ADC1_Init();
+  MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
   OLED_Init();
+
+  Telemetry_Init(&huart2);
 
   /* Start byte-by-byte UART RX */
   HAL_UART_Receive_IT(&huart3, (uint8_t *)&rx_byte, 1);
@@ -1089,22 +1156,22 @@ int main(void)
 }
 
 /**
- * @brief System Clock Configuration
- * @retval None
- */
+  * @brief System Clock Configuration
+  * @retval None
+  */
 void SystemClock_Config(void)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
   /** Configure the main internal regulator output voltage
-   */
+  */
   __HAL_RCC_PWR_CLK_ENABLE();
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
 
   /** Initializes the RCC Oscillators according to the specified parameters
-   * in the RCC_OscInitTypeDef structure.
-   */
+  * in the RCC_OscInitTypeDef structure.
+  */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
@@ -1115,8 +1182,9 @@ void SystemClock_Config(void)
   }
 
   /** Initializes the CPU, AHB and APB buses clocks
-   */
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
@@ -1129,10 +1197,10 @@ void SystemClock_Config(void)
 }
 
 /**
- * @brief ADC1 Initialization Function
- * @param None
- * @retval None
- */
+  * @brief ADC1 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_ADC1_Init(void)
 {
 
@@ -1147,7 +1215,7 @@ static void MX_ADC1_Init(void)
   /* USER CODE END ADC1_Init 1 */
 
   /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
-   */
+  */
   hadc1.Instance = ADC1;
   hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV8;
   hadc1.Init.Resolution = ADC_RESOLUTION_12B;
@@ -1166,7 +1234,7 @@ static void MX_ADC1_Init(void)
   }
 
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
-   */
+  */
   sConfig.Channel = ADC_CHANNEL_10;
   sConfig.Rank = 1;
   sConfig.SamplingTime = ADC_SAMPLETIME_480CYCLES;
@@ -1176,7 +1244,7 @@ static void MX_ADC1_Init(void)
   }
 
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
-   */
+  */
   sConfig.Channel = ADC_CHANNEL_11;
   sConfig.Rank = 2;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
@@ -1186,13 +1254,14 @@ static void MX_ADC1_Init(void)
   /* USER CODE BEGIN ADC1_Init 2 */
 
   /* USER CODE END ADC1_Init 2 */
+
 }
 
 /**
- * @brief I2C2 Initialization Function
- * @param None
- * @retval None
- */
+  * @brief I2C2 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_I2C2_Init(void)
 {
 
@@ -1219,13 +1288,14 @@ static void MX_I2C2_Init(void)
   /* USER CODE BEGIN I2C2_Init 2 */
 
   /* USER CODE END I2C2_Init 2 */
+
 }
 
 /**
- * @brief TIM2 Initialization Function
- * @param None
- * @retval None
- */
+  * @brief TIM2 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_TIM2_Init(void)
 {
 
@@ -1267,13 +1337,14 @@ static void MX_TIM2_Init(void)
   /* USER CODE BEGIN TIM2_Init 2 */
 
   /* USER CODE END TIM2_Init 2 */
+
 }
 
 /**
- * @brief TIM3 Initialization Function
- * @param None
- * @retval None
- */
+  * @brief TIM3 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_TIM3_Init(void)
 {
 
@@ -1315,13 +1386,14 @@ static void MX_TIM3_Init(void)
   /* USER CODE BEGIN TIM3_Init 2 */
 
   /* USER CODE END TIM3_Init 2 */
+
 }
 
 /**
- * @brief TIM4 Initialization Function
- * @param None
- * @retval None
- */
+  * @brief TIM4 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_TIM4_Init(void)
 {
 
@@ -1377,13 +1449,14 @@ static void MX_TIM4_Init(void)
 
   /* USER CODE END TIM4_Init 2 */
   HAL_TIM_MspPostInit(&htim4);
+
 }
 
 /**
- * @brief TIM8 Initialization Function
- * @param None
- * @retval None
- */
+  * @brief TIM8 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_TIM8_Init(void)
 {
 
@@ -1399,7 +1472,7 @@ static void MX_TIM8_Init(void)
 
   /* USER CODE END TIM8_Init 1 */
   htim8.Instance = TIM8;
-  htim8.Init.Prescaler = 16 - 1;
+  htim8.Init.Prescaler = 16-1;
   htim8.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim8.Init.Period = 65535;
   htim8.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
@@ -1427,7 +1500,7 @@ static void MX_TIM8_Init(void)
   sConfigIC.ICPolarity = TIM_INPUTCHANNELPOLARITY_BOTHEDGE;
   sConfigIC.ICSelection = TIM_ICSELECTION_DIRECTTI;
   sConfigIC.ICPrescaler = TIM_ICPSC_DIV1;
-  sConfigIC.ICFilter = 12; // 8
+  sConfigIC.ICFilter = 0;
   if (HAL_TIM_IC_ConfigChannel(&htim8, &sConfigIC, TIM_CHANNEL_2) != HAL_OK)
   {
     Error_Handler();
@@ -1435,13 +1508,14 @@ static void MX_TIM8_Init(void)
   /* USER CODE BEGIN TIM8_Init 2 */
 
   /* USER CODE END TIM8_Init 2 */
+
 }
 
 /**
- * @brief TIM9 Initialization Function
- * @param None
- * @retval None
- */
+  * @brief TIM9 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_TIM9_Init(void)
 {
 
@@ -1490,13 +1564,14 @@ static void MX_TIM9_Init(void)
 
   /* USER CODE END TIM9_Init 2 */
   HAL_TIM_MspPostInit(&htim9);
+
 }
 
 /**
- * @brief TIM12 Initialization Function
- * @param None
- * @retval None
- */
+  * @brief TIM12 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_TIM12_Init(void)
 {
 
@@ -1541,13 +1616,47 @@ static void MX_TIM12_Init(void)
 
   /* USER CODE END TIM12_Init 2 */
   HAL_TIM_MspPostInit(&htim12);
+
 }
 
 /**
- * @brief USART3 Initialization Function
- * @param None
- * @retval None
- */
+  * @brief USART2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART2_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART2_Init 0 */
+
+  /* USER CODE END USART2_Init 0 */
+
+  /* USER CODE BEGIN USART2_Init 1 */
+
+  /* USER CODE END USART2_Init 1 */
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 115200;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART2_Init 2 */
+
+  /* USER CODE END USART2_Init 2 */
+
+}
+
+/**
+  * @brief USART3 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_USART3_UART_Init(void)
 {
 
@@ -1573,11 +1682,12 @@ static void MX_USART3_UART_Init(void)
   /* USER CODE BEGIN USART3_Init 2 */
 
   /* USER CODE END USART3_Init 2 */
+
 }
 
 /**
- * Enable DMA controller clock
- */
+  * Enable DMA controller clock
+  */
 static void MX_DMA_Init(void)
 {
 
@@ -1588,13 +1698,14 @@ static void MX_DMA_Init(void)
   /* DMA2_Stream0_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
+
 }
 
 /**
- * @brief GPIO Initialization Function
- * @param None
- * @retval None
- */
+  * @brief GPIO Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_GPIO_Init(void)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
@@ -1605,15 +1716,15 @@ static void MX_GPIO_Init(void)
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
-  __HAL_RCC_GPIOA_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LED3_GPIO_Port, LED3_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOD, OLED_DC_Pin | OLED_RES_Pin | OLED_SDA_Pin | OLED_SCL_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOD, OLED_DC_Pin|OLED_RES_Pin|OLED_SDA_Pin|OLED_SCL_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(US_Trig_GPIO_Port, US_Trig_Pin, GPIO_PIN_RESET);
@@ -1626,7 +1737,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(LED3_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : OLED_DC_Pin OLED_RES_Pin OLED_SDA_Pin OLED_SCL_Pin */
-  GPIO_InitStruct.Pin = OLED_DC_Pin | OLED_RES_Pin | OLED_SDA_Pin | OLED_SCL_Pin;
+  GPIO_InitStruct.Pin = OLED_DC_Pin|OLED_RES_Pin|OLED_SDA_Pin|OLED_SCL_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -1868,7 +1979,7 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
  * @retval None
  */
 /* USER CODE END Header_ledTask */
-void ledTask(void const *argument)
+void ledTask(void const * argument)
 {
   /* USER CODE BEGIN 5 */
   /* Infinite loop */
@@ -1892,7 +2003,7 @@ void ledTask(void const *argument)
  * @retval None
  */
 /* USER CODE END Header_oledTask */
-void oledTask(void const *argument)
+void oledTask(void const * argument)
 {
   /* USER CODE BEGIN oledTask */
   char line[32];
@@ -1949,7 +2060,7 @@ void oledTask(void const *argument)
     }
 
     OLED_Refresh_Gram();
-    osDelay(100);
+    osDelay(20);
   }
   /* USER CODE END oledTask */
 }
@@ -1961,7 +2072,7 @@ void oledTask(void const *argument)
  * @retval None
  */
 /* USER CODE END Header_motorTask */
-void motorTask(void const *argument)
+void motorTask(void const * argument)
 {
   /* USER CODE BEGIN motorTask */
 
@@ -2791,7 +2902,7 @@ void motorTask(void const *argument)
  * @retval None
  */
 /* USER CODE END Header_encoderTask */
-void encoderTask(void const *argument)
+void encoderTask(void const * argument)
 {
   /* USER CODE BEGIN encoderTask */
   HAL_TIM_Encoder_Start(&htim2, TIM_CHANNEL_ALL); // encoder a
@@ -2818,6 +2929,12 @@ void encoderTask(void const *argument)
 			last_b = now_b;
 
 			last_tick += 20U; // Update tick
+
+			Telemetry_SendEncoder(
+			    (int16_t)delta_a,
+			    (int16_t)delta_b,
+			    (uart_cmd != CMD_NONE) ? 1U : 0U
+			);
 
 			// Uncomment and modify UART transmission[cite: 6]
 			char buf[32];
@@ -2851,6 +2968,7 @@ void encoderTask(void const *argument)
   }
   /* USER CODE END encoderTask */
 }
+
 /* USER CODE BEGIN Header_gyroTask */
 /**
  * @brief Function implementing the Gyro_Task thread.
@@ -2858,7 +2976,7 @@ void encoderTask(void const *argument)
  * @retval None
  */
 /* USER CODE END Header_gyroTask */
-void gyroTask(void const *argument)
+void gyroTask(void const * argument)
 {
   /* USER CODE BEGIN gyroTask */
 
@@ -2971,7 +3089,7 @@ void gyroTask(void const *argument)
  * @retval None
  */
 /* USER CODE END Header_ultrasoundTask */
-void ultrasoundTask(void const *argument)
+void ultrasoundTask(void const * argument)
 {
   /* USER CODE BEGIN ultrasoundTask */
   HAL_TIM_IC_Start_IT(&htim8, TIM_CHANNEL_2); // ✅ Start TIM8 input capture
@@ -2994,78 +3112,6 @@ void ultrasoundTask(void const *argument)
   }
   /* USER CODE END ultrasoundTask */
 }
-//
-// void ultrasoundTask(void const * argument)
-//{
-//    // Start IC and force first edge to RISING
-//    HAL_TIM_IC_Start_IT(&htim8, TIM_CHANNEL_2);
-//    __HAL_TIM_SET_CAPTUREPOLARITY(&htim8, TIM_CHANNEL_2, TIM_INPUTCHANNELPOLARITY_RISING);
-//    __HAL_TIM_SET_COUNTER(&htim8, 0);
-//    us_waiting_fall = 0;
-//
-//    // Small filters
-//    uint16_t last_cm[3] = {0,0,0};
-//    uint8_t  ring = 0, filled = 0;
-//    float ema = 0.0f;
-//    uint8_t ema_init = 0;
-//
-//    for (;;)
-//    {
-//        // Arm capture state before each ping (defensive if a previous read timed out)
-//        new_measurement_ready = false;
-//        __HAL_TIM_SET_CAPTUREPOLARITY(&htim8, TIM_CHANNEL_2, TIM_INPUTCHANNELPOLARITY_RISING);
-//        __HAL_TIM_SET_COUNTER(&htim8, 0);
-//        us_waiting_fall = 0;
-//
-//        // 10 µs trigger
-//        HCSR04_Trigger_10us();
-//
-//        // Wait (with timeout) for the ISR to latch the falling edge
-//        uint32_t t0 = HAL_GetTick();
-//        while (!new_measurement_ready) {
-//            if ((HAL_GetTick() - t0) > 30) {      // ~30 ms timeout (no echo)
-////                goto after_sample;                // skip this cycle cleanly
-//            	osDelay(30);
-//            	continue;
-//            }
-//            osDelay(1);
-//        }
-//
-//        // Convert ticks -> centimeters (1 tick = 1 µs; speedOfSound = 0.0343/2 cm/µs)
-//        uint16_t us = us_echo_ticks;
-////        if (us < 100 || us > 25000) {            // ~1.7 cm .. ~4.3 m sanity window
-////            goto after_sample;
-////        }
-//        float cm_f = (float)us * (float)(0.0343f / 2.0f);   // or: us / 58.3f
-//
-//        // Median-of-3 (helps kill occasional spikes)
-//        last_cm[ring] = (uint16_t)(cm_f + 0.5f);
-//        ring = (ring + 1) % 3;
-//        if (filled < 3) filled++;
-//
-//        float cm_med = cm_f;
-//        if (filled == 3) {
-//            uint16_t a = last_cm[0], b = last_cm[1], c = last_cm[2];
-//            // median of a,b,c without sorting library
-//            uint16_t max = (a>b ? (a>c?a:c) : (b>c?b:c));
-//            uint16_t min = (a<b ? (a<c?a:c) : (b<c?b:c));
-//            uint16_t med = a + b + c - max - min;
-//            cm_med = (float)med;
-//        }
-//
-//        // EMA for display/control smoothness
-//        if (!ema_init) { ema = cm_med; ema_init = 1; }
-//        else           { ema = 0.6f*ema + 0.4f*cm_med; }
-//
-//        // Publish
-//        distance   = ema;                         // float cm
-//        echo_debug = (uint32_t)(ema + 0.5f);      // int cm used by motorTask
-//
-////after_sample:
-//        // Minimum 60 ms between pings to avoid late-echo overlap
-////        osDelay(30);
-//    }
-//}
 
 /* USER CODE BEGIN Header_irTask */
 /**
@@ -3074,7 +3120,7 @@ void ultrasoundTask(void const *argument)
  * @retval None
  */
 /* USER CODE END Header_irTask */
-void irTask(void const *argument)
+void irTask(void const * argument)
 {
   /* USER CODE BEGIN irTask */
   /* Infinite loop */
@@ -3118,9 +3164,9 @@ void irTask(void const *argument)
 }
 
 /**
- * @brief  This function is executed in case of error occurrence.
- * @retval None
- */
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
@@ -3131,15 +3177,14 @@ void Error_Handler(void)
   }
   /* USER CODE END Error_Handler_Debug */
 }
-
 #ifdef USE_FULL_ASSERT
 /**
- * @brief  Reports the name of the source file and the source line number
- *         where the assert_param error has occurred.
- * @param  file: pointer to the source file name
- * @param  line: assert_param error line source number
- * @retval None
- */
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
 void assert_failed(uint8_t *file, uint32_t line)
 {
   /* USER CODE BEGIN 6 */

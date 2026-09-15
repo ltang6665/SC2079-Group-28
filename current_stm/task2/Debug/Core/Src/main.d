@@ -1,4 +1,4 @@
-Core/Src/main_task2.o: ../Core/Src/main_task2.c ../Core/Inc/main.h \
+Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
  ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal.h \
  ../Core/Inc/stm32f4xx_hal_conf.h \
  ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_rcc.h \
@@ -49,7 +49,8 @@ Core/Src/main_task2.o: ../Core/Src/main_task2.c ../Core/Inc/main.h \
  ../Middlewares/Third_Party/FreeRTOS/Source/include/queue.h \
  ../Middlewares/Third_Party/FreeRTOS/Source/include/event_groups.h \
  ../Middlewares/Third_Party/FreeRTOS/Source/include/timers.h \
- C:/Users/Luther/Documents/VScode/SC2079_MDP_grp_28/SC2079-MDP-main-main/stm_hardware/task2/Drivers/PeripheralDriver/Inc/oled.h
+ C:/Users/luther\ tang/Desktop/VSC\ files/SC2079-Group-28/current_stm/task2/Drivers/PeripheralDriver/Inc/oled.h \
+ ../Core/Inc/telemetry.h ../Core/Inc/main.h
 ../Core/Inc/main.h:
 ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal.h:
 ../Core/Inc/stm32f4xx_hal_conf.h:
@@ -101,4 +102,6 @@ Core/Src/main_task2.o: ../Core/Src/main_task2.c ../Core/Inc/main.h \
 ../Middlewares/Third_Party/FreeRTOS/Source/include/queue.h:
 ../Middlewares/Third_Party/FreeRTOS/Source/include/event_groups.h:
 ../Middlewares/Third_Party/FreeRTOS/Source/include/timers.h:
-C:/Users/Luther/Documents/VScode/SC2079_MDP_grp_28/SC2079-MDP-main-main/stm_hardware/task2/Drivers/PeripheralDriver/Inc/oled.h:
+C:/Users/luther\ tang/Desktop/VSC\ files/SC2079-Group-28/current_stm/task2/Drivers/PeripheralDriver/Inc/oled.h:
+../Core/Inc/telemetry.h:
+../Core/Inc/main.h:
