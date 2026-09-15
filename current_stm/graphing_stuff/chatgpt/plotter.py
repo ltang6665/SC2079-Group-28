@@ -6,74 +6,101 @@ from collections import defaultdict
 import matplotlib.pyplot as plt
 
 
-SAMPLE_PERIOD = 0.020
+SAMPLE_PERIOD = 0.020  # 20 ms = 50 Hz
 
 
 def load_log(filename):
 
     data = defaultdict(
         lambda: {
-            'time': [],
-            'a': [],
-            'b': [],
-            'command': ''
+            "time": [],
+            "a": [],
+            "b": [],
+            "command": ""
         }
     )
 
+    command_names = {}
 
-    with open(
-        filename,
-        'r',
-        newline=''
-    ) as f:
+    with open(filename, "r", newline="") as f:
 
         reader = csv.DictReader(f)
 
         for row in reader:
 
-            command_id = int(
-                row['Command_ID']
-            )
+            record_type = row["record_type"]
 
-            data[command_id]['time'].append(
-                float(row['STM_Time_s'])
-            )
+            # ==============================
+            # Command-start record
+            # ==============================
 
-            data[command_id]['a'].append(
-                int(row['Motor_A'])
-            )
+            if record_type == "CMD":
 
-            data[command_id]['b'].append(
-                int(row['Motor_B'])
-            )
+                try:
+                    command_id = int(row["command_id"])
+                except ValueError:
+                    continue
 
-            data[command_id]['command'] = (
-                row['Command']
-            )
+                command_names[command_id] = row["command"]
 
+            # ==============================
+            # Encoder sample
+            # ==============================
+
+            elif record_type == "ENC":
+
+                try:
+                    command_id = int(row["command_id"])
+                    stm_tick_ms = int(row["stm_tick_ms"])
+                    motor_a = int(row["motor_a_delta"])
+                    motor_b = int(row["motor_b_delta"])
+
+                except ValueError:
+                    continue
+
+                # command_id == 0 means robot is not executing
+                # a logged command
+                if command_id == 0:
+                    continue
+
+                data[command_id]["time"].append(
+                    stm_tick_ms / 1000.0
+                )
+
+                data[command_id]["a"].append(
+                    motor_a
+                )
+
+                data[command_id]["b"].append(
+                    motor_b
+                )
+
+    # Attach command names after reading entire file
+    for command_id in data:
+
+        data[command_id]["command"] = (
+            command_names.get(
+                command_id,
+                "UNKNOWN"
+            )
+        )
 
     return data
 
 
-def plot_command(
-    command_id,
-    command_data
-):
+def plot_command(command_id, command_data):
 
-    times = command_data['time']
-    a_vals = command_data['a']
-    b_vals = command_data['b']
-
-    command = command_data['command']
-
+    times = command_data["time"]
+    a_delta = command_data["a"]
+    b_delta = command_data["b"]
+    command = command_data["command"]
 
     if len(times) < 2:
         return
 
-
-    # ==========================================
-    # Convert global STM32 time to command time
-    # ==========================================
+    # ==============================
+    # Relative command time
+    # ==============================
 
     t0 = times[0]
 
@@ -82,119 +109,116 @@ def plot_command(
         for t in times
     ]
 
+    # ==============================
+    # Convert encoder delta
+    # counts/20ms -> counts/second
+    # ==============================
 
-    # ==========================================
-    # Calculate acceleration
-    # ==========================================
+    a_speed = [
+        value / SAMPLE_PERIOD
+        for value in a_delta
+    ]
+
+    b_speed = [
+        value / SAMPLE_PERIOD
+        for value in b_delta
+    ]
+
+    # ==============================
+    # Acceleration
+    # counts/s -> counts/s^2
+    # ==============================
 
     a_accel = [0.0]
-
     b_accel = [0.0]
 
-    for i in range(1, len(a_vals)):
+    for i in range(1, len(a_speed)):
 
-        a_speed_change = (
-            a_vals[i] - a_vals[i - 1]
-        )
+        dt = times[i] - times[i - 1]
 
-        b_speed_change = (
-            b_vals[i] - b_vals[i - 1]
-        )
+        if dt <= 0:
+            dt = SAMPLE_PERIOD
 
         a_accel.append(
-            a_speed_change
-            / SAMPLE_PERIOD
+            (a_speed[i] - a_speed[i - 1])
+            / dt
         )
 
         b_accel.append(
-            b_speed_change
-            / SAMPLE_PERIOD
+            (b_speed[i] - b_speed[i - 1])
+            / dt
         )
 
-
-    # ==========================================
+    # ==============================
     # SPEED GRAPH
-    # ==========================================
+    # ==============================
 
-    plt.figure(
-        figsize=(10, 5)
+    plt.figure(figsize=(10, 5))
+
+    plt.plot(
+        relative_time,
+        a_speed,
+        label="Motor A (Left)"
     )
 
     plt.plot(
         relative_time,
-        a_vals,
-        label='Motor A (Left)',
-        linewidth=2
-    )
-
-    plt.plot(
-        relative_time,
-        b_vals,
-        label='Motor B (Right)',
-        linewidth=2
+        b_speed,
+        label="Motor B (Right)"
     )
 
     plt.title(
-        f'Command {command_id}: {command}'
-        '\nWheel Speed'
+        f"Command {command_id}: {command}\n"
+        "Wheel Speed"
     )
 
     plt.xlabel(
-        'Time since command start (s)'
+        "Time since command start (s)"
     )
 
     plt.ylabel(
-        'Encoder counts / 20 ms'
+        "Encoder counts / second"
     )
 
     plt.legend()
-
     plt.grid(True)
-
     plt.tight_layout()
 
     plt.show()
 
-
-    # ==========================================
+    # ==============================
     # ACCELERATION GRAPH
-    # ==========================================
+    # ==============================
 
-    plt.figure(
-        figsize=(10, 5)
-    )
+    plt.figure(figsize=(10, 5))
 
     plt.plot(
         relative_time,
         a_accel,
-        label='Motor A acceleration',
-        linewidth=2
+        label="Motor A acceleration"
     )
 
     plt.plot(
         relative_time,
         b_accel,
-        label='Motor B acceleration',
-        linewidth=2
+        label="Motor B acceleration"
     )
 
     plt.title(
-        f'Command {command_id}: {command}'
-        '\nWheel Acceleration'
+        f"Command {command_id}: {command}\n"
+        "Wheel Acceleration"
     )
 
     plt.xlabel(
-        'Time since command start (s)'
+        "Time since command start (s)"
     )
 
     plt.ylabel(
-        'Change in encoder speed / s'
+        "Encoder acceleration (counts/s²)"
     )
 
     plt.legend()
-
     plt.grid(True)
-
     plt.tight_layout()
 
     plt.show()
@@ -205,19 +229,13 @@ def main():
     if len(sys.argv) != 2:
 
         print(
-            "Usage:"
-        )
-
-        print(
-            "python3 plot_robot_log.py "
-            "robot_log.csv"
+            "Usage: python3 plot_robot_log.py "
+            "robot_telemetry.csv"
         )
 
         return
 
-
     filename = sys.argv[1]
-
 
     if not os.path.exists(filename):
 
@@ -227,24 +245,26 @@ def main():
 
         return
 
-
     data = load_log(filename)
 
-
     print(
-        f"Found {len(data)} command IDs."
+        f"Found {len(data)} commands."
     )
-
 
     for command_id in sorted(data):
 
         command = data[
             command_id
-        ]['command']
+        ]["command"]
+
+        samples = len(
+            data[command_id]["time"]
+        )
 
         print(
             f"Plotting command "
-            f"{command_id}: {command}"
+            f"{command_id}: {command} "
+            f"({samples} samples)"
         )
 
         plot_command(
@@ -253,5 +273,5 @@ def main():
         )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
