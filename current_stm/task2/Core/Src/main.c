@@ -2932,10 +2932,20 @@ void encoderTask(void const * argument)
 
 			last_tick += 20U; // Update tick
 
+			// luther
+			uint32_t yaw_primask = __get_PRIMASK();
+			__disable_irq();
+			double telemetry_yaw = total_angle;
+			if (yaw_primask == 0U)
+			{
+			    __enable_irq();
+			}
+
 			Telemetry_SendEncoder(
 			    (int16_t)delta_a,
 			    (int16_t)delta_b,
 			    (uart_cmd != CMD_NONE) ? 1U : 0U
+			    (int32_t)(telemetry_yaw * 1000.0)
 			);
 
 			// Uncomment and modify UART transmission[cite: 6]
