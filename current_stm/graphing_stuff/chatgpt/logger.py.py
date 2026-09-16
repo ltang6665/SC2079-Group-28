@@ -37,7 +37,8 @@ with output_file.open(
         "command_id",
         "command",
         "motor_a_delta",
-        "motor_b_delta"
+        "motor_b_delta",
+        "yaw_deg"
     ])
 
     print(
@@ -103,6 +104,7 @@ with output_file.open(
                     command_id,
                     command,
                     "",
+                    "",
                     ""
                 ])
 
@@ -112,11 +114,11 @@ with output_file.open(
             # ---------------------------------
             # ENC
             #
-            # ENC,tick,id,a,b
+            # ENC,tick,id,a,b,yaw_mdeg (old five-field records also accepted)
             # ---------------------------------
 
             elif (
-                len(parts) == 5
+                len(parts) in (5, 6)
                 and parts[0] == "ENC"
             ):
 
@@ -126,6 +128,7 @@ with output_file.open(
                     command_id = int(parts[2])
                     motor_a = int(parts[3])
                     motor_b = int(parts[4])
+                    yaw_deg = int(parts[5]) / 1000.0 if len(parts) == 6 else ""
 
                 except ValueError:
                     continue
@@ -137,7 +140,8 @@ with output_file.open(
                     command_id,
                     "",
                     motor_a,
-                    motor_b
+                    motor_b,
+                    yaw_deg
                 ])
 
                 f.flush()

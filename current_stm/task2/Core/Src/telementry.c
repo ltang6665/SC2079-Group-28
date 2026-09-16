@@ -123,7 +123,8 @@ void Telemetry_StartCommand(const char *command_name, int value)
 void Telemetry_SendEncoder(
     int16_t motor_a,
     int16_t motor_b,
-    uint8_t command_active
+    uint8_t command_active,
+    int32_t yaw_mdeg
 )
 {
     if (telemetry_uart == NULL)
@@ -132,6 +133,7 @@ void Telemetry_SendEncoder(
     }
 
 
+    uint32_t sample_tick = HAL_GetTick();
     uint32_t command_id;
     uint8_t send_command = 0;
 
@@ -216,11 +218,11 @@ void Telemetry_SendEncoder(
      *
      * Format:
      *
-     * ENC,<stm32_tick>,<command_id>,<motor_a>,<motor_b>
+     * ENC,<stm32_tick>,<command_id>,<motor_a>,<motor_b>,<yaw_mdeg>
      *
      * Example:
      *
-     * ENC,15340,7,18,17
+     * ENC,15340,7,18,17,12500
      */
     uint32_t sample_command_id;
 
@@ -238,11 +240,12 @@ void Telemetry_SendEncoder(
     int n = snprintf(
         enc_buf,
         sizeof(enc_buf),
-        "ENC,%lu,%lu,%d,%d\r\n",
-        (unsigned long)HAL_GetTick(),
+        "ENC,%lu,%lu,%d,%d,%ld\r\n",
+        (unsigned long)sample_tick,
         (unsigned long)sample_command_id,
         (int)motor_a,
-        (int)motor_b
+        (int)motor_b,
+        (long)yaw_mdeg
     );
 
     if (n > 0)

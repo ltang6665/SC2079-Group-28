@@ -15,7 +15,7 @@
  * Initialise the telemetry module.
  *
  * uart should be the UART connected to the Raspberry Pi GPIO UART.
- * In our setup this will be &huart1.
+ * The current main.c uses &huart2.
  */
 void Telemetry_Init(UART_HandleTypeDef *uart);
 
@@ -41,7 +41,8 @@ void Telemetry_StartCommand(const char *command_name, int value);
 void Telemetry_SendEncoder(
     int16_t motor_a,
     int16_t motor_b,
-    uint8_t command_active
+    uint8_t command_active,
+    int32_t yaw_mdeg  /* integrated yaw in thousandths of a degree */
 );
 
 #endif /* INC_TELEMETRY_H_ */
