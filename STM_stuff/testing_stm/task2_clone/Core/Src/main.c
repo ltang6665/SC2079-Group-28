@@ -24,6 +24,7 @@
 /* USER CODE BEGIN Includes */
 #include "oled.h"
 #include "telemetry.h"
+#include "gyro_safe.h"
 #include "stdbool.h"
 #include <string.h>
 #include <stdlib.h>
@@ -106,6 +107,8 @@ volatile enum {
 
 static char cmd_buf[256]; // cmd buffer length
 static uint8_t cmd_idx = 0;
+static char pending_cmd_buf[256];
+static volatile uint8_t pending_cmd_ready = 0U;
 
 volatile uint32_t next_start_tick = 0; // when we’re allowed to start the next cmd
 
@@ -221,6 +224,14 @@ volatile int32_t target_counts = 0; // +ve forward, -ve reverse
 #define PWM_MIN 6800
 #define PWM_INNER 6000
 
+//luther direction
+#define FWD_LEFT_COMPARE_SCALE   1.061f
+#define FWD_RIGHT_COMPARE_SCALE  1.000f
+
+/* Starting values only — tune from telemetry. */
+#define REV_LEFT_COMPARE_SCALE   0.980f
+#define REV_RIGHT_COMPARE_SCALE  1.000f
+
 /* --- Closed-loop yaw turn controller ------------------------------------- luther
  *
  * Motor PWM is inverted by the H-bridge wiring used below:
@@ -232,7 +243,7 @@ volatile int32_t target_counts = 0; // +ve forward, -ve reverse
  */
 volatile float arc_target_angle = 0.0f;
 
-#define TURN_KP_EFFORT_PER_DEG       25.0f
+#define TURN_KP_EFFORT_PER_DEG       32.0f
 #define TURN_KI_EFFORT_PER_DEG_S      0.0f  // start at zero; integral increases overshoot
 #define TURN_KD_EFFORT_PER_DPS        2.0f
 #define TURN_I_LIMIT_DEG_S           60.0f
@@ -247,11 +258,14 @@ volatile float arc_target_angle = 0.0f;
 #define TURN_SETTLE_MS               150U
 #define TURN_RETRY_SERVO_MS           80U
 #define TURN_MAX_APPROACHES            3U
-#define TURN_TIMEOUT_BASE_MS        1000U
-#define TURN_TIMEOUT_PER_DEG_MS        50U
+#define TURN_TIMEOUT_BASE_MS        1500U
+#define TURN_TIMEOUT_PER_DEG_MS        80U
 
 #define GYRO_PERIOD_MS                10U
 #define GYRO_RATE_DEADBAND_DPS         0.50f
+#define GYRO_STALE_TIMEOUT_MS         100U
+#define GYRO_RETRY_DELAY_MS          1000U
+#define GYRO_MAX_CONSECUTIVE_FAILURES   3U
 
 #define INTER_CMD_MS 0 // tweak 80–200ms, is the delay for inbetween commands
 #define TURN_DELAY 50
@@ -278,8 +292,8 @@ volatile turn_t cmd_turn = TURN_NONE;
 
 // luther CCR
 #define SERVO_CENTER_CCR 158            // straight (you already use ~152) /155
-#define SERVO_CENTER_AFTERLEFT_CCR 165  // 161, 154
-#define SERVO_CENTER_AFTERRIGHT_CCR 156 // 148
+#define SERVO_CENTER_AFTERLEFT_CCR 164  // latest value supplied by user
+#define SERVO_CENTER_AFTERRIGHT_CCR 151 // latest value supplied by user
 #define SERVO_RIGHT_CCR 240             // <-- set to your "forward-right" CCR 250
 #define SERVO_LEFT_CCR 110              // <-- set to your "forward-left"  CCR 107
 #define SERVO_REVERSE_LEFT_CCR 110      // 112
@@ -293,12 +307,11 @@ volatile float target_angle = 0.0f; // locked when a straight move starts
 volatile float error_angle = 0.0f;  // computed in motorTask
 volatile float TURN_DEG = 90.0f;
 
-uint8_t ICMAddress = 0x68;
-uint8_t gyroBuffer[20];
-
 // Gyro and turn-controller state exposed to the telemetry task.
 volatile float gyro_bias_dps = 0.0f;
 volatile float gyro_yaw_rate_dps = 0.0f;
+volatile uint8_t gyro_healthy = 0U;
+volatile uint32_t gyro_last_good_tick = 0U;
 //static uint8_t bias_locked = 0;
 
 //luther turn start
@@ -314,6 +327,11 @@ volatile float turn_error_deg = 0.0f;
 volatile float turn_effort_cmd = 0.0f;
 volatile int turn_left_pwm = PWM_MAX;
 volatile int turn_right_pwm = PWM_MAX;
+
+/* Straight-controller outputs exposed to EncoderTask telemetry. */
+volatile int straight_left_pwm = PWM_MAX;
+volatile int straight_right_pwm = PWM_MAX;
+volatile int straight_servo_ccr = SERVO_CENTER_CCR;
 
 static float turn_i_error_deg_s = 0.0f;
 static uint32_t turn_pid_last_tick = 0U;
@@ -447,79 +465,6 @@ void irTask(void const * argument);
 /* USER CODE BEGIN 0 */
 // ultrasonic
 float speedOfSound = 0.0343 / 2;
-
-// ---- I2C helpers for ICM-20948 ----
-
-static inline bool icm_read(uint8_t reg, uint8_t *buf, uint16_t len)
-{
-  if (HAL_I2C_Mem_Read(&hi2c2, ICMAddress << 1, reg, I2C_MEMADD_SIZE_8BIT,
-                       buf, len, 2) == HAL_OK)
-    return true;
-  // Simple recovery
-  HAL_I2C_DeInit(&hi2c2);
-  if (HAL_I2C_Init(&hi2c2) != HAL_OK)
-    return false;
-  return false;
-}
-
-static inline bool icm_write(uint8_t reg, uint8_t val)
-{
-  return HAL_I2C_Mem_Write(&hi2c2, ICMAddress << 1, reg, I2C_MEMADD_SIZE_8BIT,
-                           &val, 1, 2) == HAL_OK;
-}
-
-// Read Z high/low in one go (explicit burst)
-uint16_t icm_read_gz_raw(void)
-{
-  uint8_t v[2];
-  if (!icm_read(0x37, v, 2))
-    return 0;
-  return (uint16_t)((v[0] << 8) | v[1]);
-}
-
-void readByte(uint8_t addr, uint8_t *data)
-{
-  gyroBuffer[0] = addr;
-  HAL_I2C_Master_Transmit(&hi2c2, ICMAddress << 1, gyroBuffer, 1, 10);
-  HAL_I2C_Master_Receive(&hi2c2, ICMAddress << 1, data, 2, 20);
-}
-
-void writeByte(uint8_t addr, uint8_t data)
-{
-  gyroBuffer[0] = addr;
-  gyroBuffer[1] = data;
-  HAL_I2C_Master_Transmit(&hi2c2, ICMAddress << 1, gyroBuffer, 2, 20);
-}
-
-void gyroInit()
-{
-  writeByte(0x06, 0x00);
-  osDelay(10); // PWR_MGMT_1
-  writeByte(0x03, 0x80);
-  osDelay(10); // USER_CTRL reset
-  writeByte(0x07, 0x07);
-  osDelay(10); // PWR_MGMT_2
-  writeByte(0x06, 0x01);
-  osDelay(10); // PWR_MGMT_1 clock
-  writeByte(0x7F, 0x20);
-  osDelay(10); // BANK 2
-  writeByte(0x01, 0x2F);
-  osDelay(10); // GYRO_CONFIG_1 ±2000 dps
-
-  writeByte(0x00, 0x11);
-  osDelay(10); // GYRO_LPF, 20-30Hz, bump up if laggy (0x13/0x11)
-  writeByte(0x7F, 0x00);
-  osDelay(10); // BANK 0
-  writeByte(0x07, 0x00);
-  osDelay(10); // PWR_MGMT_2 enable
-
-  // NO duty-cycling (make sure gyro never sleeps)
-  // LP_CONFIG: [ACCEL_CYCLE|I2C_MST_CYCLE|GYRO_CYCLE] must be 0
-  writeByte(0x05, 0x00);
-  osDelay(10); // LP_CONFIG
-  writeByte(0x06, 0x01);
-  osDelay(10); // PWR_MGMT_1: CLKSEL=1 (PLL), SLEEP=0
-}
 
 // delay for US
 static inline void delay_us(uint32_t us)
@@ -1127,6 +1072,7 @@ static int start_next_from_queue(void)
     target_angle = total_angle;
     set_servo_center();
     uart_cmd = CMD_REVERSE;
+    seg_rebase = 1;
     return 1;
   }
 
@@ -1266,6 +1212,8 @@ int main(void)
 
   /* USER CODE BEGIN 1 */
 
+  const uint32_t reset_cause_flags = RCC->CSR;
+
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -1302,6 +1250,23 @@ int main(void)
 
   Telemetry_Init(&huart2);
 
+  if (reset_cause_flags & RCC_CSR_IWDGRSTF)
+    Telemetry_RecordFault("BOOT_IWDG");
+  else if (reset_cause_flags & RCC_CSR_WWDGRSTF)
+    Telemetry_RecordFault("BOOT_WWDG");
+  else if (reset_cause_flags & RCC_CSR_SFTRSTF)
+    Telemetry_RecordFault("BOOT_SOFTWARE");
+  else if (reset_cause_flags & RCC_CSR_BORRSTF)
+    Telemetry_RecordFault("BOOT_BROWNOUT");
+  else if (reset_cause_flags & RCC_CSR_PINRSTF)
+    Telemetry_RecordFault("BOOT_PIN");
+  else if (reset_cause_flags & RCC_CSR_PORRSTF)
+    Telemetry_RecordFault("BOOT_POWER");
+  else
+    Telemetry_RecordFault("BOOT_OTHER");
+
+  __HAL_RCC_CLEAR_RESET_FLAGS();
+
   /* Start byte-by-byte UART RX */
   HAL_UART_Receive_IT(&huart3, (uint8_t *)&rx_byte, 1);
 
@@ -1331,7 +1296,7 @@ int main(void)
   LED_TaskHandle = osThreadCreate(osThread(LED_Task), NULL);
 
   /* definition and creation of OLED_Task */
-  osThreadDef(OLED_Task, oledTask, osPriorityIdle, 0, 256);
+  osThreadDef(OLED_Task, oledTask, osPriorityBelowNormal, 0, 384);
   OLED_TaskHandle = osThreadCreate(osThread(OLED_Task), NULL);
 
   /* definition and creation of Motor_Task */
@@ -1339,11 +1304,11 @@ int main(void)
   Motor_TaskHandle = osThreadCreate(osThread(Motor_Task), NULL);
 
   /* definition and creation of Encoder_Task */
-  osThreadDef(Encoder_Task, encoderTask, osPriorityBelowNormal, 0, 256);
+  osThreadDef(Encoder_Task, encoderTask, osPriorityBelowNormal, 0, 512);
   Encoder_TaskHandle = osThreadCreate(osThread(Encoder_Task), NULL);
 
   /* definition and creation of Gyro_Task */
-  osThreadDef(Gyro_Task, gyroTask, osPriorityNormal, 0, 256);
+  osThreadDef(Gyro_Task, gyroTask, osPriorityNormal, 0, 384);
   Gyro_TaskHandle = osThreadCreate(osThread(Gyro_Task), NULL);
 
   /* definition and creation of Ultrasound_Task */
@@ -2115,55 +2080,28 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 
     if (c == '\r' || c == '\n')
     {
-      // finalize the line
-      cmd_buf[cmd_idx] = '\0';
-
-      if (cmd_idx > 0)
+      /* Do not call strtok(), atoi(), queue code, or command-start code in
+       * interrupt context. Publish one complete line for motorTask instead. */
+      if (cmd_idx > 0U && !pending_cmd_ready)
       {
-        // normalize to lowercase (FR90 -> fr90)
-        for (uint8_t i = 0; i < cmd_idx; i++)
-        {
-          if (cmd_buf[i] >= 'A' && cmd_buf[i] <= 'Z')
-          {
-            cmd_buf[i] = (char)(cmd_buf[i] - 'A' + 'a');
-          }
-          // optional just in case: also normalize delimiters here (comma/semicolon -> space)
-          if (cmd_buf[i] == ';' || cmd_buf[i] == ',')
-            cmd_buf[i] = ' ';
-        }
-
-        // enqueue the whole script (e.g. "f50 r50 fr90 rr90")
-        parse_and_enqueue_script(cmd_buf);
-
-        // after parse_and_enqueue_script(cmd_buf);
-        //                char dbg[24];
-        //                snprintf(dbg, sizeof(dbg), "ENQ:%u\r\n", cmdq_count());
-        //                HAL_UART_Transmit(&huart3, (uint8_t*)dbg, strlen(dbg), 0xFFFF);
-
-        // if we’re idle, start immediately
-        if (uart_cmd == CMD_NONE)
-        {
-          (void)start_next_from_queue();
-        }
+        cmd_buf[cmd_idx] = '\0';
+        memcpy(pending_cmd_buf, cmd_buf, (size_t)cmd_idx + 1U);
+        pending_cmd_ready = 1U;
       }
-
-      cmd_idx = 0; // ready for the next line
+      cmd_idx = 0U;
     }
     else
     {
-      // accumulate chars until newline, guard overflow
       if (cmd_idx < sizeof(cmd_buf) - 1)
       {
         cmd_buf[cmd_idx++] = (char)c;
       }
       else
       {
-        // overflow -> drop this line
-        cmd_idx = 0;
+        cmd_idx = 0U;
       }
     }
 
-    // re-arm RX interrupt
     HAL_UART_Receive_IT(&huart3, (uint8_t *)&rx_byte, 1);
   }
 }
@@ -2243,10 +2181,21 @@ void oledTask(void const * argument)
     }
     last_btn_state = current_btn_state;
 
+    if (!gyro_healthy)
+    {
+      OLED_ShowString(0, 0, (uint8_t *)"GYRO NOT READY  ");
+      OLED_ShowString(0, 16, (uint8_t *)"MOTION DISABLED ");
+      OLED_ShowString(0, 32, (uint8_t *)"CHECK I2C/POWER ");
+      OLED_ShowString(0, 48, (uint8_t *)"POWER CYCLE CAR ");
+      OLED_Refresh_Gram();
+      osDelay(20);
+      continue;
+    }
+
     if (display_page == 0)
     {
       // --- PAGE 0: Yaw, Target, Speeds, and CMD ---
-      snprintf(line, sizeof(line), "Yaww: %-11d", (int)total_angle);
+      snprintf(line, sizeof(line), "Yaw: %-12d", (int)total_angle);
       OLED_ShowString(0, 0, (uint8_t *)line);
 
       snprintf(line, sizeof(line), "Tgt: %-11d", (int)arc_target_angle);
@@ -2316,8 +2265,47 @@ void motorTask(void const * argument)
 
   motor_brake(); // start safe
                  /* Infinite loop */
+  char command_line[sizeof(pending_cmd_buf)];
   for (;;)
   {
+    if (pending_cmd_ready)
+    {
+      uint32_t primask = __get_PRIMASK();
+      __disable_irq();
+      memcpy(command_line, pending_cmd_buf, sizeof(command_line));
+      pending_cmd_ready = 0U;
+      if (primask == 0U)
+        __enable_irq();
+
+      command_line[sizeof(command_line) - 1U] = '\0';
+      for (size_t index = 0U; command_line[index] != '\0'; ++index)
+      {
+        if (command_line[index] >= 'A' && command_line[index] <= 'Z')
+          command_line[index] = (char)(command_line[index] - 'A' + 'a');
+        if (command_line[index] == ';' || command_line[index] == ',')
+          command_line[index] = ' ';
+      }
+
+      parse_and_enqueue_script(command_line);
+      if (uart_cmd == CMD_NONE && !abort_now)
+        (void)start_next_from_queue();
+    }
+
+    /* Every motion mode depends on valid heading feedback. Never continue a
+     * command with a failed or stale gyro. */
+    if (uart_cmd != CMD_NONE && uart_cmd != CMD_STOP)
+    {
+      const uint32_t now = HAL_GetTick();
+      const bool stale = gyro_healthy &&
+                         ((uint32_t)(now - gyro_last_good_tick) >
+                          GYRO_STALE_TIMEOUT_MS);
+
+      if (!gyro_healthy || stale)
+      {
+        Telemetry_RecordFault(stale ? "GYRO_STALE" : "GYRO_NOT_READY");
+        abort_now = 1U;
+      }
+    }
 
 
     // emergency-stop
@@ -2403,6 +2391,8 @@ void motorTask(void const * argument)
       //  ====== Persistent PID state ======
       static int32_t i_acc = 0;
       static int32_t prev_err = 0;
+      static float cpsA_f = 0.0f;
+      static float cpsB_f = 0.0f;
 
       // ====== Distance stop using average counts ======
       uint16_t now_a = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
@@ -2588,6 +2578,8 @@ void motorTask(void const * argument)
         // optional: also clear PID transients to avoid a kick
         i_acc = 0;
         prev_err = 0;
+        cpsA_f = 0.0f;
+        cpsB_f = 0.0f;
 
         // Do NOT compute da/db or update odometers this tick
       }
@@ -2617,7 +2609,7 @@ void motorTask(void const * argument)
       int32_t cpsB = (int32_t)db * 1000 / (int32_t)dt_ms;
 
       // ---- Low-pass filter for PID feedback ----
-      static float cpsA_f = 0.0f, cpsB_f = 0.0f; // filtered cps
+      //static float cpsA_f = 0.0f, cpsB_f = 0.0f; // filtered cps
       float dt_s = (float)dt_ms / 1000.0f;
       float alpha = dt_s / (SPEED_LPF_TAU + dt_s); // 0<alpha<1, automatic with your dt
 
@@ -2639,21 +2631,16 @@ void motorTask(void const * argument)
       // Calculate heading error BEFORE using it for gyro feedback
       error_angle = target_angle - total_angle;
 
-      // Gyro-based error (heading drift correction)
-      // If drifting right (positive angle error), reduce right motor (positive off)
-      // If drifting left (negative angle error), increase right motor (negative off)
-      const float K_GYRO = 15.0f; // tune: higher = more aggressive gyro correction
-      int32_t gyro_err = (int32_t)(K_GYRO * error_angle);
+      /* Wheel PI balances encoder speeds. Heading is corrected by the servo
+       * below. Feeding yaw into both loops makes them fight each other. */
+      int32_t err = speed_err;
 
-      // Combined error for motor correction
-      int32_t err = speed_err + gyro_err;
-    //  int32_t err = speed_err ;
-
-      i_acc += err; // <- no anti-windup: integrate always
-      // lets add anti wind up
-      //          const int32_t IACC_CLAMP = 25000;
-      //          if(i_acc > IACC_CLAMP) i_acc = IACC_CLAMP;
-      //          if(i_acc < -IACC_CLAMP) i_acc = -IACC_CLAMP;
+      i_acc += err;
+      const int32_t IACC_CLAMP = 25000;
+      if (i_acc > IACC_CLAMP)
+        i_acc = IACC_CLAMP;
+      if (i_acc < -IACC_CLAMP)
+        i_acc = -IACC_CLAMP;
 
       int32_t d = err - prev_err;
       prev_err = err;
@@ -2662,31 +2649,53 @@ void motorTask(void const * argument)
       int off = (int)off_f;
       //int off = 0;
 
-      // --- Base speed (allow a manual global scale later if you add it) ---
+      // luther speed
       int base = PWM_RUN;
 
-      // --- Steering profile (no angle math) ---
-      float scaleL = 1.0f, scaleR = 1.0f;
-      int base_L = (int)(base*1.16); //luther
-      int base_R = base;
+      /*
+       * Select a separate feed-forward calibration depending on direction.
+       * This is evaluated here because an obstacle command may have changed
+       * CMD_FORWARD into CMD_REVERSE earlier in this same loop iteration.
+       */
+      const bool is_reverse = (uart_cmd == CMD_REVERSE);
 
-      // --- Apply PID offset (if any) and steering scales ---
-     // int lDuty = PWM_RUN;
-//      int lDuty = 4000;
-//      int rDuty = PWM_RUN;
-      // luther
-        int lDuty, rDuty;
+      const float left_compare_scale =
+          is_reverse
+              ? REV_LEFT_COMPARE_SCALE
+              : FWD_LEFT_COMPARE_SCALE;
 
-		if (uart_cmd == CMD_FORWARD) {
-			// In forward, adding 'off' increases the duty variable, slowing the left motor down.
-			lDuty = (int)((base_L + off) * scaleL);
-			rDuty = (int)((base_R - off) * scaleR);
-		} else {
-			// In reverse, the negative velocities mean 'off' is naturally inverted,
-			// so the original subtraction logic provides the correct negative feedback.
-			lDuty = (int)((base_L - off) * scaleL);
-			rDuty = (int)((base_R + off) * scaleR);
-		}
+      const float right_compare_scale =
+          is_reverse
+              ? REV_RIGHT_COMPARE_SCALE
+              : FWD_RIGHT_COMPARE_SCALE;
+
+      int base_L =
+          (int)((float)base * left_compare_scale + 0.5f);
+
+      int base_R =
+          (int)((float)base * right_compare_scale + 0.5f);
+
+      int lDuty;
+      int rDuty;
+
+      if (!is_reverse)
+      {
+          /*
+           * Larger compare = less power.
+           * Positive off slows left and speeds up right.
+           */
+          lDuty = base_L + off;
+          rDuty = base_R - off;
+      }
+      else
+      {
+          /*
+           * Encoder speeds are negative in reverse, so the correction
+           * direction must be inverted.
+           */
+          lDuty = base_L - off;
+          rDuty = base_R + off;
+      }
 
       lDuty = clamp_pwm_compare(lDuty);
       rDuty = clamp_pwm_compare(rDuty);
@@ -2763,6 +2772,10 @@ void motorTask(void const * argument)
       if (servo > SERVO_RIGHT_CCR)
         servo = SERVO_RIGHT_CCR;
 
+      straight_left_pwm = lDuty;
+      straight_right_pwm = rDuty;
+      straight_servo_ccr = servo;
+
       // add sliding right
       // === Slide state machine overrides servo while active ===
       if (slide_mode != SLIDE_NONE)
@@ -2821,6 +2834,7 @@ void motorTask(void const * argument)
           if ((slide_mode == SLIDE_RIGHT && total_angle >= arc_target_angle - 5.0) || // slide_return_heading
               (slide_mode == SLIDE_LEFT && total_angle <= arc_target_angle + 5.0))
           {
+            const slide_t completed_slide = slide_mode;
             // done: hand back to your normal straight-line hold
             //						slide_phase = SP_RECENTER;
             slide_mode = SLIDE_NONE;
@@ -2829,13 +2843,13 @@ void motorTask(void const * argument)
             arc_target_angle = slide_origin_heading; // restore straight reference
             htim12.Instance->CCR2 = servo;           // normal correction resumes
 
-            if (slide_mode == SLIDE_RIGHT)
+            if (completed_slide == SLIDE_RIGHT)
             {
               set_servo_center_afterright();
             }
 
 
-            if (slide_mode == SLIDE_LEFT)
+            if (completed_slide == SLIDE_LEFT)
             {
               set_servo_center_afterleft();
             }
@@ -2936,6 +2950,7 @@ void motorTask(void const * argument)
           (int32_t)(now - turn_timeout_tick) >= 0)
       {
         motor_brake();
+        Telemetry_RecordFault("TURN_TIMEOUT");
         abort_now = 1U;
         break;
       }
@@ -3105,8 +3120,13 @@ void encoderTask(void const * argument)
 
   for (;;)
   {
-	  if ((HAL_GetTick() - last_tick) >= 20U) // Changed to 20 ms window (50 Hz)
+	  uint32_t sample_tick = HAL_GetTick();
+	  if ((sample_tick - last_tick) >= 20U) // nominal 50 Hz
 		  {
+			uint32_t elapsed_ms = sample_tick - last_tick;
+			uint16_t sample_dt_ms = (elapsed_ms > UINT16_MAX)
+			                          ? UINT16_MAX
+			                          : (uint16_t)elapsed_ms;
 			// ---- Encoder A (TIM2) ----
 			uint16_t now_a = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
 			delta_a = (int16_t)(now_a - last_a);
@@ -3118,14 +3138,17 @@ void encoderTask(void const * argument)
 			delta_b = -delta_b;
 			last_b = now_b;
 
-			last_tick += 20U; // Update tick
+			/* Do not use += 20 here. After a delayed task that causes rapid
+			 * catch-up samples and false speed spikes. */
+			last_tick = sample_tick;
 
 
 			// luther telementry
 				Telemetry_SendEncoder(
 				    (int16_t)delta_a,
 				    (int16_t)delta_b,
-				    (uart_cmd != CMD_NONE) ? 1U : 0U
+				    (uart_cmd != CMD_NONE) ? 1U : 0U,
+				    sample_dt_ms
 				);
 
 				Telemetry_SendTurn(
@@ -3138,6 +3161,17 @@ void encoderTask(void const * argument)
 				    turn_right_pwm,
 				    (uint8_t)turn_control_phase,
 				    is_turn_command((int)uart_cmd) ? 1U : 0U
+				);
+
+				Telemetry_SendStraight(
+				    total_angle,
+				    target_angle,
+				    gyro_yaw_rate_dps,
+				    error_angle,
+				    straight_servo_ccr,
+				    straight_left_pwm,
+				    straight_right_pwm,
+				    (uart_cmd == CMD_FORWARD || uart_cmd == CMD_REVERSE) ? 1U : 0U
 				);
 			  }
 //    if ((HAL_GetTick() - last_tick) >= 1000U) // 1 s window
@@ -3232,52 +3266,81 @@ void gyroTask(void const * argument)
   //	        }
   //	    }
 
-  gyroInit();
+  GyroSafe gyro = {0};
 
-  uint8_t val[2] = {0};
-  int16_t angular_speed = 0;
-
-  float offset_raw = 0.0f;
-
-  // ---- Calibration ----
-  // Keep the robot completely still during these first two seconds.
-  for (int i = 0; i < 200; i++)
-  {
-    osDelay(GYRO_PERIOD_MS);
-    readByte(0x37, val); // GYRO_ZOUT_H
-    angular_speed = (int16_t)((val[0] << 8) | val[1]);
-    offset_raw += (float)angular_speed;
-  }
-  offset_raw /= 200.0f;
-  gyro_bias_dps = offset_raw / 16.4f;
-
-  uint32_t tick = HAL_GetTick();
-  float previous_rate_dps = 0.0f;
-
-  // ---- Main loop ----
   for (;;)
   {
-    osDelay(GYRO_PERIOD_MS);
+    gyro_healthy = 0U;
+    gyro_yaw_rate_dps = 0.0f;
 
-    readByte(0x37, val); // GYRO_ZOUT_H
-    angular_speed = (int16_t)((val[0] << 8) | val[1]);
+    if (!GyroSafe_Recover(&gyro, &hi2c2))
+    {
+      Telemetry_RecordFault("GYRO_INIT");
+      osDelay(GYRO_RETRY_DELAY_MS);
+      continue;
+    }
 
-    uint32_t now = HAL_GetTick();
-    float dt_s = (float)(now - tick) * 0.001f;
-    tick = now;
+    /* Keep the robot completely still for this approximately two-second
+     * calibration. Any failed sample rejects the whole calibration. */
+    if (!GyroSafe_Calibrate(&gyro, 200U, GYRO_PERIOD_MS))
+    {
+      Telemetry_RecordFault("GYRO_CAL");
+      osDelay(GYRO_RETRY_DELAY_MS);
+      continue;
+    }
 
-    // Prevent an unusual scheduler stall from creating one huge yaw jump.
-    if (dt_s > 0.050f)
-      dt_s = 0.050f;
+    gyro_bias_dps = gyro.bias_raw / 16.4f;
 
-    float rate_dps = (((float)angular_speed - offset_raw) / 16.4f) * GYRO_SCALE_TRIM;
-    if (fabsf(rate_dps) < GYRO_RATE_DEADBAND_DPS)
-      rate_dps = 0.0f;
+    /* Heading cannot be reconstructed across a sensor failure, so rebase it
+     * after a successful recovery. motorTask prevents motion while unhealthy. */
+    total_angle = 0.0f;
+    target_angle = 0.0f;
+    arc_target_angle = 0.0f;
 
-    // Trapezoidal integration is less phase-lagged/noisy than the old 20 ms rectangle.
-    total_angle += 0.5f * (previous_rate_dps + rate_dps) * dt_s;
-    previous_rate_dps = rate_dps;
-    gyro_yaw_rate_dps = rate_dps;
+    uint32_t tick = HAL_GetTick();
+    float previous_rate_dps = 0.0f;
+    uint8_t consecutive_failures = 0U;
+
+    gyro_last_good_tick = tick;
+    gyro_healthy = 1U;
+
+    for (;;)
+    {
+      float rate_dps;
+      osDelay(GYRO_PERIOD_MS);
+
+      if (!GyroSafe_ReadRateDps(&gyro, GYRO_SCALE_TRIM, &rate_dps))
+      {
+        consecutive_failures++;
+        if (consecutive_failures >= GYRO_MAX_CONSECUTIVE_FAILURES)
+        {
+          gyro_healthy = 0U;
+          gyro_yaw_rate_dps = 0.0f;
+          Telemetry_RecordFault("GYRO_I2C");
+          break;
+        }
+        continue;
+      }
+
+      consecutive_failures = 0U;
+
+      uint32_t now = HAL_GetTick();
+      float dt_s = (float)(now - tick) * 0.001f;
+      tick = now;
+      gyro_last_good_tick = now;
+
+      if (dt_s > 0.050f)
+        dt_s = 0.050f;
+
+      if (fabsf(rate_dps) < GYRO_RATE_DEADBAND_DPS)
+        rate_dps = 0.0f;
+
+      total_angle += 0.5f * (previous_rate_dps + rate_dps) * dt_s;
+      previous_rate_dps = rate_dps;
+      gyro_yaw_rate_dps = rate_dps;
+    }
+
+    osDelay(GYRO_RETRY_DELAY_MS);
   }
   /* USER CODE END gyroTask */
 }

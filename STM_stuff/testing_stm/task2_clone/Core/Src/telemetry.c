@@ -1,112 +1,80 @@
-/*
- * telementry.c
- *
- *  Created on: 15 Sept 2026
- *      Author: luther tang
- */
 #include "telemetry.h"
 
 #include <stdio.h>
 #include <string.h>
 
 #define TELEMETRY_COMMAND_NAME_LEN 16
+#define TELEMETRY_FAULT_CODE_LEN   20
 
-/*
- * UART used exclusively for telemetry.
- *
- * We store a pointer instead of directly referring to huart1 so that
- * telemetry.c does not depend specifically on USART1.
- */
 static UART_HandleTypeDef *telemetry_uart = NULL;
 
-
-/*
- * Current command information.
- */
 static volatile uint32_t current_command_id = 0;
-
 static volatile uint8_t command_pending = 0;
-
 static char pending_command_name[TELEMETRY_COMMAND_NAME_LEN];
-
 static volatile int pending_command_value = 0;
-
 static volatile uint32_t pending_command_tick = 0;
 
+static volatile uint8_t fault_pending = 0;
+static volatile uint32_t pending_fault_tick = 0;
+static char pending_fault_code[TELEMETRY_FAULT_CODE_LEN];
 
-/*
- * Initialise telemetry.
- */
-void Telemetry_Init(UART_HandleTypeDef *uart)
+
+static int32_t scale_by_1000(float value)
 {
-    telemetry_uart = uart;
-
-    current_command_id = 0;
-    command_pending = 0;
-
-    pending_command_name[0] = '\0';
-    pending_command_value = 0;
-    pending_command_tick = 0;
+    float scaled = value * 1000.0f;
+    scaled += (scaled >= 0.0f) ? 0.5f : -0.5f;
+    return (int32_t)scaled;
 }
 
 
-/*
- * Record the start of a new command.
- *
- * No UART transmission happens here.
- *
- * This is intentional because start_next_from_queue() can currently
- * be called from HAL_UART_RxCpltCallback().
- */
+static void transmit_line(char *buffer, size_t size, int length)
+{
+    if (telemetry_uart == NULL || length <= 0 || length >= (int)size)
+    {
+        return;
+    }
+
+    (void)HAL_UART_Transmit(
+        telemetry_uart,
+        (uint8_t *)buffer,
+        (uint16_t)length,
+        10
+    );
+}
+
+
+void Telemetry_Init(UART_HandleTypeDef *uart)
+{
+    telemetry_uart = uart;
+    current_command_id = 0;
+    command_pending = 0;
+    fault_pending = 0;
+    pending_command_name[0] = '\0';
+    pending_fault_code[0] = '\0';
+}
+
+
 void Telemetry_StartCommand(const char *command_name, int value)
 {
+    char temp_name[TELEMETRY_COMMAND_NAME_LEN];
+    uint32_t primask;
+
     if (command_name == NULL)
     {
         return;
     }
 
-    /*
-     * Prepare the command name first.
-     */
-    char temp_name[TELEMETRY_COMMAND_NAME_LEN];
+    strncpy(temp_name, command_name, sizeof(temp_name) - 1U);
+    temp_name[sizeof(temp_name) - 1U] = '\0';
 
-    strncpy(
-        temp_name,
-        command_name,
-        TELEMETRY_COMMAND_NAME_LEN - 1
-    );
-
-    temp_name[TELEMETRY_COMMAND_NAME_LEN - 1] = '\0';
-
-
-    /*
-     * Protect shared state from the encoder task.
-     *
-     * Save PRIMASK so this works whether we arrived here from a task
-     * or from an interrupt.
-     */
-    uint32_t primask = __get_PRIMASK();
-
+    primask = __get_PRIMASK();
     __disable_irq();
 
     current_command_id++;
-
     pending_command_tick = HAL_GetTick();
     pending_command_value = value;
-
-    memcpy(
-        pending_command_name,
-        temp_name,
-        TELEMETRY_COMMAND_NAME_LEN
-    );
-
-    /*
-     * Set this LAST.
-     *
-     * Once command_pending becomes 1, EncoderTask is allowed to consume
-     * the information above.
-     */
-    command_pending = 1;
+    memcpy(pending_command_name, temp_name, sizeof(pending_command_name));
+    command_pending = 1U;
 
     if (primask == 0U)
     {
@@ -115,55 +83,75 @@ void Telemetry_StartCommand(const char *command_name, int value)
 }
 
 
-/*
- * Called from EncoderTask every 20 ms.
- *
- * UART transmission happens here, NOT inside the command RX interrupt.
- */
+void Telemetry_RecordFault(const char *fault_code)
+{
+    char temp_code[TELEMETRY_FAULT_CODE_LEN];
+    uint32_t primask;
+
+    if (fault_code == NULL)
+    {
+        return;
+    }
+
+    strncpy(temp_code, fault_code, sizeof(temp_code) - 1U);
+    temp_code[sizeof(temp_code) - 1U] = '\0';
+
+    primask = __get_PRIMASK();
+    __disable_irq();
+
+    pending_fault_tick = HAL_GetTick();
+    memcpy(pending_fault_code, temp_code, sizeof(pending_fault_code));
+    fault_pending = 1U;
+
+    if (primask == 0U)
+    {
+        __enable_irq();
+    }
+}
+
+
 void Telemetry_SendEncoder(
     int16_t motor_a,
     int16_t motor_b,
-    uint8_t command_active
+    uint8_t command_active,
+    uint16_t sample_dt_ms
 )
 {
+    uint32_t command_id;
+    uint8_t send_command = 0U;
+    uint8_t send_fault = 0U;
+    uint32_t command_tick = 0U;
+    uint32_t fault_tick = 0U;
+    int command_value = 0;
+    char command_name[TELEMETRY_COMMAND_NAME_LEN] = {0};
+    char fault_code[TELEMETRY_FAULT_CODE_LEN] = {0};
+    uint32_t primask;
+
     if (telemetry_uart == NULL)
     {
         return;
     }
 
-
-    uint32_t command_id;
-    uint8_t send_command = 0;
-
-    uint32_t command_tick = 0;
-    int command_value = 0;
-
-    char command_name[TELEMETRY_COMMAND_NAME_LEN];
-
-
-    /*
-     * Snapshot the shared telemetry state.
-     */
-    uint32_t primask = __get_PRIMASK();
-
+    primask = __get_PRIMASK();
     __disable_irq();
 
     command_id = current_command_id;
 
     if (command_pending)
     {
-        send_command = 1;
-
+        send_command = 1U;
         command_tick = pending_command_tick;
         command_value = pending_command_value;
+        memcpy(command_name, pending_command_name, sizeof(command_name));
+        command_pending = 0U;
+    }
 
-        memcpy(
-            command_name,
-            pending_command_name,
-            TELEMETRY_COMMAND_NAME_LEN
-        );
-
-        command_pending = 0;
+    if (fault_pending)
+    {
+        send_fault = 1U;
+        fault_tick = pending_fault_tick;
+        memcpy(fault_code, pending_fault_code, sizeof(fault_code));
+        fault_pending = 0U;
     }
 
     if (primask == 0U)
@@ -171,117 +159,53 @@ void Telemetry_SendEncoder(
         __enable_irq();
     }
 
-
-    /*
-     * First report a pending command-start event.
-     *
-     * Format:
-     *
-     * CMD,<command_id>,<stm32_tick>,<command>:<value>
-     *
-     * Example:
-     *
-     * CMD,7,15320,FWD_CM:50
-     */
     if (send_command)
     {
-        char cmd_buf[64];
-
-        int n = snprintf(
-            cmd_buf,
-            sizeof(cmd_buf),
+        char buffer[64];
+        int length = snprintf(
+            buffer,
+            sizeof(buffer),
             "CMD,%lu,%lu,%s:%d\r\n",
             (unsigned long)command_id,
             (unsigned long)command_tick,
             command_name,
             command_value
         );
-
-        if (n > 0)
-        {
-            HAL_UART_Transmit(
-                telemetry_uart,
-                (uint8_t *)cmd_buf,
-                (uint16_t)n,
-                10
-            );
-        }
+        transmit_line(buffer, sizeof(buffer), length);
     }
 
-
-    /*
-     * Encoder sample.
-     *
-     * When the robot is between commands we report command ID 0.
-     *
-     * Format:
-     *
-     * ENC,<stm32_tick>,<command_id>,<motor_a>,<motor_b>
-     *
-     * Example:
-     *
-     * ENC,15340,7,18,17
-     */
-    uint32_t sample_command_id;
-
-    if (command_active)
+    if (send_fault)
     {
-        sample_command_id = command_id;
-    }
-    else
-    {
-        sample_command_id = 0;
-    }
-
-    char enc_buf[64];
-
-    int n = snprintf(
-        enc_buf,
-        sizeof(enc_buf),
-        "ENC,%lu,%lu,%d,%d\r\n",
-        (unsigned long)HAL_GetTick(),
-        (unsigned long)sample_command_id,
-        (int)motor_a,
-        (int)motor_b
-    );
-
-    if (n > 0)
-    {
-        HAL_UART_Transmit(
-            telemetry_uart,
-            (uint8_t *)enc_buf,
-            (uint16_t)n,
-            10
+        char buffer[64];
+        int length = snprintf(
+            buffer,
+            sizeof(buffer),
+            "FLT,%lu,%lu,%s\r\n",
+            (unsigned long)fault_tick,
+            (unsigned long)command_id,
+            fault_code
         );
+        transmit_line(buffer, sizeof(buffer), length);
+    }
+
+    {
+        uint32_t sample_command_id = command_active ? command_id : 0U;
+        char buffer[72];
+        int length = snprintf(
+            buffer,
+            sizeof(buffer),
+            "ENC,%lu,%lu,%d,%d,%u\r\n",
+            (unsigned long)HAL_GetTick(),
+            (unsigned long)sample_command_id,
+            (int)motor_a,
+            (int)motor_b,
+            (unsigned int)sample_dt_ms
+        );
+        transmit_line(buffer, sizeof(buffer), length);
     }
 }
 
 
-static int32_t scale_by_1000(float value)
-{
-    float scaled = value * 1000.0f;
-
-    if (scaled >= 0.0f)
-    {
-        scaled += 0.5f;
-    }
-    else
-    {
-        scaled -= 0.5f;
-    }
-
-    return (int32_t)scaled;
-}
-
-
-/*
- * Closed-loop turn sample.
- *
- * Wire format (angles/rate are scaled by 1000):
- *
- * TRN,<tick>,<id>,<yaw_mdeg>,<target_mdeg>,<rate_mdps>,
- *     <error_mdeg>,<effort>,<left_pwm>,<right_pwm>,<phase>
- */
 void Telemetry_SendTurn(
     float yaw_deg,
     float target_deg,
@@ -294,27 +218,27 @@ void Telemetry_SendTurn(
     uint8_t turn_active
 )
 {
+    uint32_t command_id;
+    uint32_t primask;
+    char buffer[160];
+    int length;
+
     if (telemetry_uart == NULL || !turn_active)
     {
         return;
     }
 
-    uint32_t command_id;
-    uint32_t primask = __get_PRIMASK();
-
+    primask = __get_PRIMASK();
     __disable_irq();
     command_id = current_command_id;
-
     if (primask == 0U)
     {
         __enable_irq();
     }
 
-    char turn_buf[160];
-
-    int n = snprintf(
-        turn_buf,
-        sizeof(turn_buf),
+    length = snprintf(
+        buffer,
+        sizeof(buffer),
         "TRN,%lu,%lu,%ld,%ld,%ld,%ld,%d,%d,%d,%u\r\n",
         (unsigned long)HAL_GetTick(),
         (unsigned long)command_id,
@@ -327,15 +251,52 @@ void Telemetry_SendTurn(
         right_pwm,
         (unsigned int)phase
     );
-
-    if (n > 0 && n < (int)sizeof(turn_buf))
-    {
-        HAL_UART_Transmit(
-            telemetry_uart,
-            (uint8_t *)turn_buf,
-            (uint16_t)n,
-            10
-        );
-    }
+    transmit_line(buffer, sizeof(buffer), length);
 }
 
+
+void Telemetry_SendStraight(
+    float yaw_deg,
+    float target_deg,
+    float yaw_rate_dps,
+    float error_deg,
+    int servo_ccr,
+    int left_pwm,
+    int right_pwm,
+    uint8_t straight_active
+)
+{
+    uint32_t command_id;
+    uint32_t primask;
+    char buffer[144];
+    int length;
+
+    if (telemetry_uart == NULL || !straight_active)
+    {
+        return;
+    }
+
+    primask = __get_PRIMASK();
+    __disable_irq();
+    command_id = current_command_id;
+    if (primask == 0U)
+    {
+        __enable_irq();
+    }
+
+    length = snprintf(
+        buffer,
+        sizeof(buffer),
+        "STR,%lu,%lu,%ld,%ld,%ld,%ld,%d,%d,%d\r\n",
+        (unsigned long)HAL_GetTick(),
+        (unsigned long)command_id,
+        (long)scale_by_1000(yaw_deg),
+        (long)scale_by_1000(target_deg),
+        (long)scale_by_1000(yaw_rate_dps),
+        (long)scale_by_1000(error_deg),
+        servo_ccr,
+        left_pwm,
+        right_pwm
+    );
+    transmit_line(buffer, sizeof(buffer), length);
+}

@@ -1,56 +1,23 @@
-/*
- * telementary.h
- *
- *  Created on: 15 Sept 2026
- *      Author: luther tang
- */
-
 #ifndef INC_TELEMETRY_H_
 #define INC_TELEMETRY_H_
 
 #include "main.h"
 #include <stdint.h>
 
-/*
- * Initialise the telemetry module.
- *
- * uart should be the UART connected to the Raspberry Pi GPIO UART.
- * In this project the dedicated Raspberry Pi telemetry link is &huart2.
- */
 void Telemetry_Init(UART_HandleTypeDef *uart);
-
-/*
- * Called whenever a new robot command actually begins executing.
- *
- * IMPORTANT:
- * This function does NOT transmit over UART.
- * It only records the event so it is safe to call from the existing
- * command-start path, which can currently be reached from the UART ISR.
- */
 void Telemetry_StartCommand(const char *command_name, int value);
 
-/*
- * Send one encoder sample.
- *
- * motor_a and motor_b are the encoder deltas measured over the 20 ms window.
- *
- * command_active:
- *   1 -> associate sample with current command
- *   0 -> mark sample as idle using command ID 0
- */
+/* Records a fault for EncoderTask to transmit; safe to call from another task. */
+void Telemetry_RecordFault(const char *fault_code);
+
+/* Called by EncoderTask. sample_dt_ms is the real encoder measurement window. */
 void Telemetry_SendEncoder(
     int16_t motor_a,
     int16_t motor_b,
-    uint8_t command_active
+    uint8_t command_active,
+    uint16_t sample_dt_ms
 );
 
-/*
- * Send one closed-loop turn sample.
- *
- * The function uses integer-scaled fields on the wire, so STM32 printf does
- * not need floating-point formatting support. Nothing is sent when
- * turn_active is zero.
- */
 void Telemetry_SendTurn(
     float yaw_deg,
     float target_deg,
@@ -61,6 +28,18 @@ void Telemetry_SendTurn(
     int right_pwm,
     uint8_t phase,
     uint8_t turn_active
+);
+
+/* Optional straight-run record used to diagnose veering and servo correction. */
+void Telemetry_SendStraight(
+    float yaw_deg,
+    float target_deg,
+    float yaw_rate_dps,
+    float error_deg,
+    int servo_ccr,
+    int left_pwm,
+    int right_pwm,
+    uint8_t straight_active
 );
 
 #endif /* INC_TELEMETRY_H_ */

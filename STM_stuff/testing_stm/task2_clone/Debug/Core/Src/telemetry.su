@@ -1,5 +1,8 @@
-../Core/Src/telemetry.c:40:6:Telemetry_Init	16	static
-../Core/Src/telemetry.c:61:6:Telemetry_StartCommand	48	static,ignoring_inline_asm
-../Core/Src/telemetry.c:123:6:Telemetry_SendEncoder	224	static,ignoring_inline_asm
-../Core/Src/telemetry.c:260:16:scale_by_1000	24	static
-../Core/Src/telemetry.c:285:6:Telemetry_SendTurn	272	static,ignoring_inline_asm
+../Core/Src/telemetry.c:22:16:scale_by_1000	24	static
+../Core/Src/telemetry.c:30:13:transmit_line	24	static
+../Core/Src/telemetry.c:46:6:Telemetry_Init	16	static
+../Core/Src/telemetry.c:57:6:Telemetry_StartCommand	48	static,ignoring_inline_asm
+../Core/Src/telemetry.c:86:6:Telemetry_RecordFault	56	static,ignoring_inline_asm
+../Core/Src/telemetry.c:113:6:Telemetry_SendEncoder	192	static,ignoring_inline_asm
+../Core/Src/telemetry.c:209:6:Telemetry_SendTurn	272	static,ignoring_inline_asm
+../Core/Src/telemetry.c:258:6:Telemetry_SendStraight	248	static,ignoring_inline_asm
