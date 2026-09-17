@@ -1,12 +1,18 @@
 import csv
 import sys
 import os
+import math
 from collections import defaultdict
 
 import matplotlib.pyplot as plt
 
 
 SAMPLE_PERIOD = 0.020  # 20 ms = 50 Hz
+
+#True:first valid sample is 0 degrees. False: raw integrated gyro yaw.
+""" The next command starts its plot at 0° again, even though the underlying gyro yaw continues accumulating.
+its a signed net rotation: turning back toward the starting heading reduces the plotted yaw. It does not sum the absolute amount of turning. """
+RELATIVE_YAW = True
 
 
 def load_log(filename):
@@ -16,6 +22,7 @@ def load_log(filename):
             "time": [],
             "a": [],
             "b": [],
+            "yaw": [],
             "command": ""
         }
     )
@@ -74,6 +81,13 @@ def load_log(filename):
                 data[command_id]["b"].append(
                     motor_b
                 )
+                try:
+                    yaw = float(row.get("yaw_deg", ""))
+                    if not math.isfinite(yaw):
+                        yaw = float("nan")
+                except (ValueError, TypeError):
+                    yaw = float("nan")
+                data[command_id]["yaw"].append(yaw)
 
     # Attach command names after reading entire file
     for command_id in data:
@@ -97,6 +111,11 @@ def plot_command(
     a_delta = command_data["a"]
     b_delta = command_data["b"]
     command = command_data["command"]
+    yaw = command_data["yaw"]
+    yaw_origin = next((value for value in yaw if math.isfinite(value)), 0.0)
+    # Keep acquisition order, including repeated/decreasing yaw values.
+    # total_angle is already cumulative; do not wrap it to +/-180 degrees.
+    plot_yaw = [value - yaw_origin if RELATIVE_YAW else value for value in yaw]
 
     if len(times) < 2:
         return
@@ -132,15 +151,15 @@ def plot_command(
     # Calculate acceleration
     # ==========================================
 
-    a_accel = [0.0]
-    b_accel = [0.0]
+    a_accel = [float("nan")]
+    b_accel = [float("nan")]
 
     for i in range(1, len(a_speed)):
 
         dt = times[i] - times[i - 1]
 
         if dt <= 0:
-            dt = SAMPLE_PERIOD
+            dt = float("nan")
 
         a_accel.append(
             (a_speed[i] - a_speed[i - 1])
@@ -156,11 +175,13 @@ def plot_command(
     # ONE WINDOW FOR THIS COMMAND
     # ==========================================
 
-    fig, (ax_speed, ax_accel) = plt.subplots(
+    fig, axes = plt.subplots(
         2,
-        1,
-        figsize=(10, 8)
+        2,
+        figsize=(14, 9)
     )
+    ax_speed, ax_speed_yaw = axes[0]
+    ax_accel, ax_accel_yaw = axes[1]
 
     # Set actual Windows window title
     manager = fig.canvas.manager
@@ -199,7 +220,7 @@ def plot_command(
     )
 
     ax_speed.set_xlabel(
-        "Time since command start (s)"
+        "Time since first command sample (s)"
     )
 
     ax_speed.set_ylabel(
@@ -232,7 +253,7 @@ def plot_command(
     )
 
     ax_accel.set_xlabel(
-        "Time since command start (s)"
+        "Time since first command sample (s)"
     )
 
     ax_accel.set_ylabel(
@@ -242,15 +263,33 @@ def plot_command(
     ax_accel.legend()
     ax_accel.grid(True)
 
+    yaw_label = ("Yaw relative to first command sample (degrees)"
+                 if RELATIVE_YAW else "Integrated gyro yaw (degrees)")
+    for ax, a_values, b_values, title, units in (
+        (ax_speed_yaw, a_speed, b_speed, "Wheel Speed vs Yaw", "Encoder counts / second"),
+        (ax_accel_yaw, a_accel, b_accel, "Wheel Acceleration vs Yaw", "Encoder acceleration (counts/s²)"),
+    ):
+        ax.set_title(title)
+        ax.set_xlabel(yaw_label)
+        ax.set_ylabel(units)
+        ax.grid(True)
+        if any(math.isfinite(value) for value in plot_yaw):
+            ax.plot(plot_yaw, a_values, ".-", label="Motor A (Left)", linewidth=1, markersize=3)
+            ax.plot(plot_yaw, b_values, ".-", label="Motor B (Right)", linewidth=1, markersize=3)
+            ax.legend()
+        else:
+            ax.text(0.5, 0.5, "No yaw data in this log.\nRecord a new log with updated firmware/logger.",
+                    ha="center", va="center", transform=ax.transAxes)
+
     # Prevent graphs/titles overlapping
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
 
 def main():
 
     if len(sys.argv) != 2:
 
         print(
-            "Usage: python3 plot_robot_log.py "
+            "Usage: python plotter.py "
             "robot_telemetry.csv"
         )
 
