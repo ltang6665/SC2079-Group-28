@@ -58,9 +58,9 @@
 ../Core/Src/main.c:2109:6:HAL_ADC_ConvCpltCallback	2
 ../Core/Src/main.c:2140:6:ledTask	1
 ../Core/Src/main.c:2164:6:oledTask	6
-../Core/Src/main.c:2244:6:motorTask	110
-../Core/Src/main.c:3111:6:encoderTask	7
-../Core/Src/main.c:3212:6:gyroTask	7
-../Core/Src/main.c:3355:6:ultrasoundTask	2
-../Core/Src/main.c:3386:6:irTask	1
-../Core/Src/main.c:3433:6:Error_Handler	1
+../Core/Src/main.c:2244:6:motorTask	111
+../Core/Src/main.c:3115:6:encoderTask	7
+../Core/Src/main.c:3216:6:gyroTask	7
+../Core/Src/main.c:3359:6:ultrasoundTask	2
+../Core/Src/main.c:3390:6:irTask	1
+../Core/Src/main.c:3437:6:Error_Handler	1

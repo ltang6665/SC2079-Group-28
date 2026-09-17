@@ -224,8 +224,8 @@ volatile int32_t target_counts = 0; // +ve forward, -ve reverse
 #define PWM_MIN 6800
 #define PWM_INNER 6000
 
-//luther direction
-#define FWD_LEFT_COMPARE_SCALE   1.061f
+//luther direction higher value = slower
+#define FWD_LEFT_COMPARE_SCALE   1.060f
 #define FWD_RIGHT_COMPARE_SCALE  1.000f
 
 /* Starting values only — tune from telemetry. */
@@ -253,8 +253,8 @@ volatile float arc_target_angle = 0.0f;
 #define TURN_INNER_EFFORT_RATIO_R     0.42f
 #define TURN_INNER_EFFORT_RATIO_L     0.42f
 
-#define TURN_FINISH_TOL_DEG           1.0f
-#define TURN_BRAKE_LOOKAHEAD_S        0.035f // main parameter for consistent overshoot
+#define TURN_FINISH_TOL_DEG           0.5f //tighten the finish tolerance by decreasing
+#define TURN_BRAKE_LOOKAHEAD_S        0.007f // main parameter for consistent overshoot, Overshooting: increase look-ahead
 #define TURN_SETTLE_MS               150U
 #define TURN_RETRY_SERVO_MS           80U
 #define TURN_MAX_APPROACHES            3U
@@ -267,7 +267,7 @@ volatile float arc_target_angle = 0.0f;
 #define GYRO_RETRY_DELAY_MS          1000U
 #define GYRO_MAX_CONSECUTIVE_FAILURES   3U
 
-#define INTER_CMD_MS 0 // tweak 80–200ms, is the delay for inbetween commands
+#define INTER_CMD_MS 500 // tweak 80–200ms, is the delay for inbetween commands
 #define TURN_DELAY 50
 #define TURN_DELAY_LEFT 100
 #define TURN_DELAY_RIGHT 100
@@ -291,7 +291,7 @@ volatile turn_t cmd_turn = TURN_NONE;
 //    htim12.Instance->CCR2 = 100; // extreme left
 
 // luther CCR
-#define SERVO_CENTER_CCR 158            // straight (you already use ~152) /155
+#define SERVO_CENTER_CCR 157            // straight (you already use ~152) /155
 #define SERVO_CENTER_AFTERLEFT_CCR 164  // latest value supplied by user
 #define SERVO_CENTER_AFTERRIGHT_CCR 151 // latest value supplied by user
 #define SERVO_RIGHT_CCR 240             // <-- set to your "forward-right" CCR 250
@@ -2194,38 +2194,38 @@ void oledTask(void const * argument)
 
     if (display_page == 0)
     {
-      // --- PAGE 0: Yaw, Target, Speeds, and CMD ---
-      snprintf(line, sizeof(line), "Yaw: %-12d", (int)total_angle);
-      OLED_ShowString(0, 0, (uint8_t *)line);
+    	// --- PAGE 0: Yaw, Target, Speeds, and CMD ---
+		snprintf(line, sizeof(line), "Yaw: %-11.1f", (double)total_angle);
+		OLED_ShowString(0, 0, (uint8_t *)line);
 
-      snprintf(line, sizeof(line), "Tgt: %-11d", (int)arc_target_angle);
-      OLED_ShowString(0, 16, (uint8_t *)line);
+		snprintf(line, sizeof(line), "Tgt: %-11d", (int)arc_target_angle);
+		OLED_ShowString(0, 16, (uint8_t *)line);
 
-      snprintf(line, sizeof(line), "A:%5d B:%5d", (int)delta_a, (int)delta_b);
-      OLED_ShowString(0, 32, (uint8_t *)line);
+		snprintf(line, sizeof(line), "A:%5d B:%5d", (int)delta_a, (int)delta_b);
+		OLED_ShowString(0, 32, (uint8_t *)line);
 
-      snprintf(line, sizeof(line), "CMD: %-11s", uart_cmd_to_string());
-      OLED_ShowString(0, 48, (uint8_t *)line);
-    }
+		snprintf(line, sizeof(line), "CMD: %-11s", uart_cmd_to_string());
+		OLED_ShowString(0, 48, (uint8_t *)line);
+	}
     else if (display_page == 1)
     {
-      // --- PAGE 1: Ultrasonic, IR mV/Status, and IR Distances ---
+		// --- PAGE 1: Ultrasonic, IR mV/Status, and IR Distances ---
 
-      // Line 1 ($y = 0): Ultrasonic Distance
-      snprintf(line, sizeof(line), "US Dist: %3d cm    ", (int)echo_debug);
-      OLED_ShowString(0, 0, (uint8_t *)line);
+		// Line 1 ($y = 0): Ultrasonic Distance
+		snprintf(line, sizeof(line), "US Dist: %3d cm    ", (int)echo_debug);
+		OLED_ShowString(0, 0, (uint8_t *)line);
 
-      // Line 2 ($y = 16): IR0 Millivolts and Status
-      snprintf(line, sizeof(line), "L:%4umV [%d]   ", ir0_mV, ir0_obs);
-      OLED_ShowString(0, 16, (uint8_t *)line);
+		// Line 2 ($y = 16): IR0 Millivolts and Status
+		snprintf(line, sizeof(line), "L:%4umV [%d]   ", ir0_mV, ir0_obs);
+		OLED_ShowString(0, 16, (uint8_t *)line);
 
-      // Line 3 ($y = 32): IR1 Millivolts and Status
-      snprintf(line, sizeof(line), "R:%4umV [%d]   ", ir1_mV, ir1_obs);
-      OLED_ShowString(0, 32, (uint8_t *)line);
+		// Line 3 ($y = 32): IR1 Millivolts and Status
+		snprintf(line, sizeof(line), "R:%4umV [%d]   ", ir1_mV, ir1_obs);
+		OLED_ShowString(0, 32, (uint8_t *)line);
 
-      // Line 4 ($y = 48): Calculated Distances for both IR sensors
-      snprintf(line, sizeof(line), "L:%dcm R:%dcm   ", (int)ir0_distance_cm, (int)ir1_distance_cm);
-      OLED_ShowString(0, 48, (uint8_t *)line);
+		// Line 4 ($y = 48): Calculated Distances for both IR sensors
+		snprintf(line, sizeof(line), "L:%dcm R:%dcm   ", (int)ir0_distance_cm, (int)ir1_distance_cm);
+		OLED_ShowString(0, 48, (uint8_t *)line);
     }
 
     OLED_Refresh_Gram();
@@ -2708,7 +2708,7 @@ void motorTask(void const * argument)
 
       // adding servo deadband here
 
-      const float K_SERVO = 1.0f; // was 3.5f; lower = less twitchy
+      const float K_SERVO = 1.5f; // was 3.5f; lower = less twitchy
 
       // Deadband: ignore tiny heading error (< 0.3°) to prevent servo hunting
       //			if (error_angle > -0.1f && error_angle < 0.1f) {
@@ -2727,7 +2727,11 @@ void motorTask(void const * argument)
           steering_error = 0.0f;
       }
 
-      int corr = (int)(K_SERVO * steering_error);
+      float corr_f = K_SERVO * steering_error;
+
+      int corr = (corr_f >= 0.0f)
+                   ? (int)(corr_f + 0.5f)
+                   : (int)(corr_f - 0.5f);
 
       /* Start from the centre established by the previous turn. */
       int servo = (int)current_center_ccr;

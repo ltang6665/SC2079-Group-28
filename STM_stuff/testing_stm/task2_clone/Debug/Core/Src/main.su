@@ -58,9 +58,9 @@
 ../Core/Src/main.c:2109:6:HAL_ADC_ConvCpltCallback	24	static
 ../Core/Src/main.c:2140:6:ledTask	24	static
 ../Core/Src/main.c:2164:6:oledTask	64	static
-../Core/Src/main.c:2244:6:motorTask	608	static,ignoring_inline_asm
-../Core/Src/main.c:3111:6:encoderTask	80	static
-../Core/Src/main.c:3212:6:gyroTask	48	static
-../Core/Src/main.c:3355:6:ultrasoundTask	16	static
-../Core/Src/main.c:3386:6:irTask	40	static
-../Core/Src/main.c:3433:6:Error_Handler	4	static,ignoring_inline_asm
+../Core/Src/main.c:2244:6:motorTask	616	static,ignoring_inline_asm
+../Core/Src/main.c:3115:6:encoderTask	80	static
+../Core/Src/main.c:3216:6:gyroTask	48	static
+../Core/Src/main.c:3359:6:ultrasoundTask	16	static
+../Core/Src/main.c:3390:6:irTask	40	static
+../Core/Src/main.c:3437:6:Error_Handler	4	static,ignoring_inline_asm
