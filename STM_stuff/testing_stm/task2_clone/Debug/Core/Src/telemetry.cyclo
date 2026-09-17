@@ -1,0 +1,5 @@
+../Core/Src/telemetry.c:40:6:Telemetry_Init	1
+../Core/Src/telemetry.c:61:6:Telemetry_StartCommand	3
+../Core/Src/telemetry.c:123:6:Telemetry_SendEncoder	8
+../Core/Src/telemetry.c:260:16:scale_by_1000	2
+../Core/Src/telemetry.c:285:6:Telemetry_SendTurn	6

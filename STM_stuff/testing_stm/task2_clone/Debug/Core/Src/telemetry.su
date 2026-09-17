@@ -1,0 +1,5 @@
+../Core/Src/telemetry.c:40:6:Telemetry_Init	16	static
+../Core/Src/telemetry.c:61:6:Telemetry_StartCommand	48	static,ignoring_inline_asm
+../Core/Src/telemetry.c:123:6:Telemetry_SendEncoder	224	static,ignoring_inline_asm
+../Core/Src/telemetry.c:260:16:scale_by_1000	24	static
+../Core/Src/telemetry.c:285:6:Telemetry_SendTurn	272	static,ignoring_inline_asm
