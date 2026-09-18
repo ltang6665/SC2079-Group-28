@@ -68,8 +68,8 @@ all: main-build
 main-build: task2.elf secondary-outputs
 
 # Tool invocations
-task2.elf task2.map: $(OBJS) $(USER_OBJS) C:\Users\luther\ tang\Desktop\VSC\ files\SC2079-Group-28\STM_stuff\testing_stm\task2_clone\STM32F407VETX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-gcc -o "task2.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m4 -T"C:\Users\luther tang\Desktop\VSC files\SC2079-Group-28\STM_stuff\testing_stm\task2_clone\STM32F407VETX_FLASH.ld" --specs=nosys.specs -Wl,-Map="task2.map" -Wl,--gc-sections -static -u _printf_float --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+task2.elf task2.map: $(OBJS) $(USER_OBJS) C:\Users\Luther\Documents\VScode\SC2079_MDP_grp_28\SC2079-Group-28\STM_stuff\testing_stm\task2_clone\STM32F407VETX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-gcc -o "task2.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m4 -T"C:\Users\Luther\Documents\VScode\SC2079_MDP_grp_28\SC2079-Group-28\STM_stuff\testing_stm\task2_clone\STM32F407VETX_FLASH.ld" --specs=nosys.specs -Wl,-Map="task2.map" -Wl,--gc-sections -static -u _printf_float --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
 	@echo 'Finished building target: $@'
 	@echo ' '
 

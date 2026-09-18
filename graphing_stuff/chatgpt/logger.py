@@ -66,7 +66,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path(f"robot_telemetry_{timestamp}.csv"),
+        default=Path(f"rt_{timestamp}.csv"),
     )
     return parser.parse_args()
 

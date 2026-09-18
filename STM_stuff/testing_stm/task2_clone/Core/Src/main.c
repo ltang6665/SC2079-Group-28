@@ -291,7 +291,7 @@ volatile turn_t cmd_turn = TURN_NONE;
 //    htim12.Instance->CCR2 = 100; // extreme left
 
 // luther CCR
-#define SERVO_CENTER_CCR 157            // straight (you already use ~152) /155
+#define SERVO_CENTER_CCR 152            // straight (you already use ~152) /155
 #define SERVO_CENTER_AFTERLEFT_CCR 164  // latest value supplied by user
 #define SERVO_CENTER_AFTERRIGHT_CCR 151 // latest value supplied by user
 #define SERVO_RIGHT_CCR 240             // <-- set to your "forward-right" CCR 250
@@ -2195,7 +2195,7 @@ void oledTask(void const * argument)
     if (display_page == 0)
     {
     	// --- PAGE 0: Yaw, Target, Speeds, and CMD ---
-		snprintf(line, sizeof(line), "Yaw: %-11.1f", (double)total_angle);
+		snprintf(line, sizeof(line), "Yaww: %-11.1f", (double)total_angle);
 		OLED_ShowString(0, 0, (uint8_t *)line);
 
 		snprintf(line, sizeof(line), "Tgt: %-11d", (int)arc_target_angle);

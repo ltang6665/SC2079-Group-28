@@ -39,15 +39,15 @@ Idx Name          Size      VMA       LMA       File off  Algn
                   CONTENTS, READONLY, DEBUGGING, OCTETS
  17 .debug_macro  0002650f  00000000  00000000  00035267  2**0
                   CONTENTS, READONLY, DEBUGGING, OCTETS
- 18 .debug_line   0001d991  00000000  00000000  0005b776  2**0
+ 18 .debug_line   0001daf0  00000000  00000000  0005b776  2**0
                   CONTENTS, READONLY, DEBUGGING, OCTETS
- 19 .debug_str    000e7450  00000000  00000000  00079107  2**0
+ 19 .debug_str    000e745c  00000000  00000000  00079266  2**0
                   CONTENTS, READONLY, DEBUGGING, OCTETS
- 20 .comment      00000043  00000000  00000000  00160557  2**0
+ 20 .comment      00000043  00000000  00000000  001606c2  2**0
                   CONTENTS, READONLY
- 21 .debug_frame  00007a40  00000000  00000000  0016059c  2**2
+ 21 .debug_frame  00007a40  00000000  00000000  00160708  2**2
                   CONTENTS, READONLY, DEBUGGING, OCTETS
- 22 .debug_line_str 00000087  00000000  00000000  00167fdc  2**0
+ 22 .debug_line_str 00000093  00000000  00000000  00168148  2**0
                   CONTENTS, READONLY, DEBUGGING, OCTETS
 
 Disassembly of section .text:
@@ -7526,7 +7526,7 @@ void oledTask(void const * argument)
  80038ca:	d14d      	bne.n	8003968 <oledTask+0x12c>
     {
     	// --- PAGE 0: Yaw, Target, Speeds, and CMD ---
-		snprintf(line, sizeof(line), "Yaw: %-11.1f", (double)total_angle);
+		snprintf(line, sizeof(line), "Yaww: %-11.1f", (double)total_angle);
  80038cc:	4b5f      	ldr	r3, [pc, #380]	@ (8003a4c <oledTask+0x210>)
  80038ce:	681b      	ldr	r3, [r3, #0]
  80038d0:	4618      	mov	r0, r3
