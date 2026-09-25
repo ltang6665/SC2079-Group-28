@@ -1,0 +1,11 @@
+../Core/Src/manual_control.c:7:12:sign_of	1
+../Core/Src/manual_control.c:13:13:skip_space	3
+../Core/Src/manual_control.c:18:13:read_number	10
+../Core/Src/manual_control.c:36:13:read_signed	5
+../Core/Src/manual_control.c:49:13:valid_setpoint	15
+../Core/Src/manual_control.c:59:6:Manual_ParseLine	17
+../Core/Src/manual_control.c:90:6:Manual_Init	1
+../Core/Src/manual_control.c:95:6:Manual_Begin	1
+../Core/Src/manual_control.c:104:6:Manual_Tick	4
+../Core/Src/manual_control.c:115:6:Manual_Accept	15
+../Core/Src/manual_control.c:140:16:Manual_Output	6

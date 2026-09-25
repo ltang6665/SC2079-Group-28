@@ -24,6 +24,7 @@
 /* USER CODE BEGIN Includes */
 #include "oled.h"
 #include "telemetry.h"
+#include "manual_control.h"
 #include "gyro_safe.h"
 #include "stdbool.h"
 #include <string.h>
@@ -102,11 +103,13 @@ volatile enum {
   CMD_ARC_RIGHT,
   CMD_ARC_LEFT,
   CMD_ARC_RIGHT_REV,
-  CMD_ARC_LEFT_REV
+  CMD_ARC_LEFT_REV,
+  CMD_MANUAL
 } uart_cmd;
 
 static char cmd_buf[256]; // cmd buffer length
-static uint8_t cmd_idx = 0;
+static uint16_t cmd_idx = 0;
+static uint8_t cmd_overflow = 0U;
 static char pending_cmd_buf[256];
 static volatile uint8_t pending_cmd_ready = 0U;
 
@@ -731,6 +734,194 @@ static void finish_turn_command(int completed_command)
   }
 } //luther turn helper end
 
+
+/* ---------------- luther Hold-to-drive manual mode ----------------
+ * UART ISR only copies lines. motorTask owns this state and all motor writes.
+ * A newer heartbeat replaces an older one; there is no movement command queue.
+ */
+static ManualControl manual_control;
+static volatile uint8_t manual_uart_owned = 0U;
+static volatile uint8_t manual_line_pending = 0U;
+static volatile char manual_rx_line[MANUAL_LINE_SIZE];
+static volatile uint8_t manual_driving = 0U;
+static int manual_last_steer = 0;
+static int manual_telemetry_kind = 0;
+static char manual_reply_pending[80];
+static char manual_reply_tx[80];
+
+static void manual_publish_line(const char *line)
+{
+    size_t n = strlen(line);
+    if (n >= MANUAL_LINE_SIZE) return;
+    /* This producer runs only inside the USART3 RX ISR. */
+    for (size_t i = 0; i <= n; ++i) manual_rx_line[i] = line[i];
+    if (strncmp(line, "jbegin ", 7U) == 0) manual_uart_owned = 1U;
+    manual_line_pending = 1U;
+}
+
+static void manual_queue_reply(const char *text)
+{
+    /* Both this pending buffer and the active TX buffer are task-owned. */
+    (void)snprintf(manual_reply_pending, sizeof(manual_reply_pending), "%s", text);
+}
+
+static void manual_flush_reply(void)
+{
+    if (manual_reply_pending[0] == '\0' || uart3_tx_busy) return;
+    memcpy(manual_reply_tx, manual_reply_pending, sizeof(manual_reply_tx));
+    uart3_tx_busy = 1U;
+    if (HAL_UART_Transmit_IT(&huart3, (uint8_t *)manual_reply_tx,
+                            (uint16_t)strlen(manual_reply_tx)) == HAL_OK) {
+        manual_reply_pending[0] = '\0';
+    } else {
+        uart3_tx_busy = 0U; /* Keep the pending reply and retry on the next motor tick. */
+    }
+}
+
+static void manual_recenter(void)
+{
+    if (manual_last_steer > 0) set_servo_center_afterright();
+    else if (manual_last_steer < 0) set_servo_center_afterleft();
+    else set_servo_center();
+    manual_last_steer = 0;
+}
+
+static void manual_exit(void)
+{
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    manual_line_pending = 0U;
+    manual_uart_owned = 0U;
+    if (primask == 0U) __enable_irq();
+    if (manual_control.owns_motors) manual_recenter();
+    Manual_Init(&manual_control);
+    manual_driving = 0U;
+    manual_telemetry_kind = 0;
+    manual_reply_pending[0] = '\0';
+    seg_rebase = 1U;
+}
+
+static void manual_begin_mode(uint32_t session, uint32_t now)
+{
+    const int previous_command = (int)uart_cmd;
+    motor_brake();
+    if (is_turn_command(previous_command)) center_servo_after_turn(previous_command);
+    else manual_recenter();
+    cmdq_clear();
+    stop_turn_controller();
+    obstacle_stop_mode = OBST_MODE_NONE;
+    slide_mode = SLIDE_NONE;
+    slide_phase = SP_NONE;
+    target_counts = 0;
+    target_angle = total_angle;
+    arc_postforward_cm = 0U;
+    turn_motor_enable_tick = 0U;
+    next_start_tick = 0U;
+    odom_counts_run = 0;
+    odom_cm_run = 0.0f;
+    odom_counts_run_ir = 0;
+    odom_cm_run_ir = 0.0f;
+    seg_rebase = 1U;
+    Manual_Begin(&manual_control, session, now);
+    manual_uart_owned = 1U;
+    manual_driving = 0U;
+    manual_telemetry_kind = 0;
+    uart_cmd = CMD_MANUAL;
+}
+
+static void manual_apply_output(ManualSetpoint output)
+{
+    if (output.steering == 0) {
+        manual_recenter();
+    } else {
+        const int reverse = manual_control.requested.direction < 0;
+        const int end_ccr = output.steering > 0
+            ? (reverse ? SERVO_REVERSE_RIGHT_CCR : SERVO_RIGHT_CCR)
+            : (reverse ? SERVO_REVERSE_LEFT_CCR : SERVO_LEFT_CCR);
+        const int magnitude = abs(output.steering);
+        const int servo = (int)current_center_ccr +
+                         (end_ccr - (int)current_center_ccr) * magnitude / 100;
+        htim12.Instance->CCR2 = (uint32_t)servo;
+        manual_last_steer = output.steering;
+    }
+    manual_driving = (output.direction != 0) ? 1U : 0U;
+    if (output.direction > 0) {
+        left_forward_duty(pwm_compare_from_effort((float)output.left_effort));
+        right_forward_duty(pwm_compare_from_effort((float)output.right_effort));
+    } else if (output.direction < 0) {
+        left_reverse_duty(pwm_compare_from_effort((float)output.left_effort));
+        right_reverse_duty(pwm_compare_from_effort((float)output.right_effort));
+    } else {
+        motor_brake();
+    }
+}
+
+static int manual_service(void)
+{
+    char line[MANUAL_LINE_SIZE];
+    char reply[80];
+    uint8_t have_line = 0U;
+    const uint32_t now = HAL_GetTick();
+    const uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    if (manual_line_pending) {
+        for (size_t i = 0; i < sizeof(line); ++i) line[i] = manual_rx_line[i];
+        manual_line_pending = 0U;
+        have_line = 1U;
+    }
+    if (primask == 0U) __enable_irq();
+
+    if (Manual_Tick(&manual_control, now)) {
+        (void)snprintf(reply, sizeof(reply), "JFAULT %lu TIMEOUT\r\n",
+                       (unsigned long)manual_control.session);
+        manual_queue_reply(reply);
+    }
+    if (have_line) {
+        ManualMessage message;
+        if (Manual_ParseLine(line, &message)) {
+            if (message.type == MANUAL_BEGIN) {
+                manual_begin_mode(message.session, now);
+                (void)snprintf(reply, sizeof(reply), "JREADY %lu\r\n",
+                               (unsigned long)message.session);
+                manual_queue_reply(reply);
+            } else if (Manual_Accept(&manual_control, &message, now)) {
+                (void)snprintf(reply, sizeof(reply), "JACK %lu %lu\r\n",
+                               (unsigned long)message.session,
+                               (unsigned long)message.sequence);
+                manual_queue_reply(reply);
+            }
+        }
+    }
+    if (!manual_control.owns_motors) {
+        /* Do not overwrite a BEGIN ownership flag set by a newer interrupt. */
+        const uint32_t saved = __get_PRIMASK();
+        __disable_irq();
+        if (!manual_line_pending) manual_uart_owned = 0U;
+        if (saved == 0U) __enable_irq();
+        manual_flush_reply();
+        return 0;
+    }
+
+    /* No target angle, terminal yaw PID, automatic post-turn travel, or queue. */
+    const ManualSetpoint request = manual_control.requested;
+    const int steer_sign = (request.steering > 0) - (request.steering < 0);
+    const int kind = request.direction == 0 ? 0 :
+                     (request.direction > 0 ? 1 : 4) + (steer_sign + 1);
+    if (kind != 0 && kind != manual_telemetry_kind) {
+        const char *name = request.direction > 0
+            ? (steer_sign < 0 ? "MAN_FL" : (steer_sign > 0 ? "MAN_FR" : "MAN_FWD"))
+            : (steer_sign < 0 ? "MAN_RL" : (steer_sign > 0 ? "MAN_RR" : "MAN_REV"));
+        const int effort = request.left_effort > request.right_effort
+                         ? request.left_effort : request.right_effort;
+        Telemetry_StartCommand(name, effort);
+    }
+    manual_telemetry_kind = kind;
+    manual_apply_output(Manual_Output(&manual_control, now));
+    manual_flush_reply();
+    return 1;
+}
+/* ---------------- luther End hold-to-drive manual mode ---------------- */
+
 static const char *uart_cmd_to_string(void)
 {
   switch (uart_cmd)
@@ -751,6 +942,8 @@ static const char *uart_cmd_to_string(void)
     return "ARC_RR";
   case CMD_ARC_LEFT_REV:
     return "ARC_RL";
+  case CMD_MANUAL:
+     return "MANUAL";
   default:
     return "?";
   }
@@ -2072,7 +2265,7 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 // }
 
 // keep this callback short, just update the buffer and add to queue once \n
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+/*void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
   if (huart->Instance == USART3)
   {
@@ -2082,7 +2275,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     {
       /* Do not call strtok(), atoi(), queue code, or command-start code in
        * interrupt context. Publish one complete line for motorTask instead. */
-      if (cmd_idx > 0U && !pending_cmd_ready)
+	/*if (cmd_idx > 0U && !pending_cmd_ready)
       {
         cmd_buf[cmd_idx] = '\0';
         memcpy(pending_cmd_buf, cmd_buf, (size_t)cmd_idx + 1U);
@@ -2104,6 +2297,48 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 
     HAL_UART_Receive_IT(&huart3, (uint8_t *)&rx_byte, 1);
   }
+}*/
+
+// luther new callback for controller pad
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  if (huart->Instance != USART3) return;
+  const uint8_t c = rx_byte;
+  if (c == '\r' || c == '\n') {
+    cmd_buf[cmd_idx] = '\0';
+    if (!cmd_overflow && cmd_idx > 0U) {
+      for (uint16_t i = 0U; i < cmd_idx; ++i) {
+        if (cmd_buf[i] >= 'A' && cmd_buf[i] <= 'Z')
+          cmd_buf[i] = (char)(cmd_buf[i] - 'A' + 'a');
+      }
+      if (strcmp(cmd_buf, "rst") == 0) {
+        /* Priority abort; never enqueue it behind a held movement. */
+        abort_now = 1U;
+      } else if (cmd_buf[0] == 'j') {
+        manual_publish_line(cmd_buf);
+      } else if (!manual_uart_owned && !abort_now) {
+        for (uint16_t i = 0U; i < cmd_idx; ++i)
+          if (cmd_buf[i] == ';' || cmd_buf[i] == ',') cmd_buf[i] = ' ';
+        parse_and_enqueue_script(cmd_buf);
+        if (uart_cmd == CMD_NONE && !abort_now) (void)start_next_from_queue();
+      }
+      /* Ordinary scripted commands are ignored while manual mode owns motors. */
+    }
+    cmd_idx = 0U;
+    cmd_overflow = 0U;
+  } else if (!cmd_overflow) {
+    if (c < 32U || c > 126U) {
+      if (c != '\t') cmd_overflow = 1U;
+      else if (cmd_idx < sizeof(cmd_buf) - 1U) cmd_buf[cmd_idx++] = (char)c;
+      else cmd_overflow = 1U;
+    } else if (cmd_idx < sizeof(cmd_buf) - 1U) {
+      cmd_buf[cmd_idx++] = (char)c;
+    } else {
+      /* Discard the WHOLE overlong line, including its tail, until a delimiter. */
+      cmd_overflow = 1U;
+    }
+  }
+  HAL_UART_Receive_IT(&huart3, (uint8_t *)&rx_byte, 1);
 }
 
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
@@ -2263,6 +2498,8 @@ void motorTask(void const * argument)
   HAL_TIM_PWM_Start(&htim9, TIM_CHANNEL_1); //
   HAL_TIM_PWM_Start(&htim9, TIM_CHANNEL_2); //
 
+  Manual_Init(&manual_control); // luther controller
+
   motor_brake(); // start safe
                  /* Infinite loop */
   char command_line[sizeof(pending_cmd_buf)];
@@ -2313,6 +2550,7 @@ void motorTask(void const * argument)
     {
 
     	const int interrupted_command = (int)uart_cmd;
+    	manual_exit();
 
 		abort_now = 0;
 		obstacle_stop_mode = OBST_MODE_NONE;
@@ -2352,7 +2590,11 @@ void motorTask(void const * argument)
 		 * Send the reset acknowledgement if UART3 is available.
 		 * static keeps the buffer valid during interrupt transmission.
 		 */
-		const char rst_message[] = "RST\r\n";
+
+		manual_queue_reply("RST\r\n");
+		manual_flush_reply();
+
+		/*const char rst_message[] = "RST\r\n";
 
 		if (!uart3_tx_busy)
 		{
@@ -2363,16 +2605,22 @@ void motorTask(void const * argument)
 					(uint8_t *)rst_message,
 					sizeof(rst_message) - 1) != HAL_OK)
 			{
-				/* Transmission did not start, so release the busy flag. */
+				//Transmission did not start, so release the busy flag.
 				uart3_tx_busy = 0;
 			}
-		}
+		}*/
 
 		osDelay(5);
 
 		/* Skip normal motor processing and restart the motor loop. */
 		continue;
 
+    }
+
+    if (manual_service())
+    {
+    	osDelay(5);
+    	continue;
     }
 
     switch (uart_cmd)
@@ -2574,12 +2822,13 @@ void motorTask(void const * argument)
         last_b = now_b;
         last_t = t;
         seg_rebase = 0;
+        cpsA_f = 0.0f;
+        cpsB_f = 0.0f;
+
 
         // optional: also clear PID transients to avoid a kick
         i_acc = 0;
         prev_err = 0;
-        cpsA_f = 0.0f;
-        cpsB_f = 0.0f;
 
         // Do NOT compute da/db or update odometers this tick
       }
@@ -3151,8 +3400,8 @@ void encoderTask(void const * argument)
 				Telemetry_SendEncoder(
 				    (int16_t)delta_a,
 				    (int16_t)delta_b,
-				    (uart_cmd != CMD_NONE) ? 1U : 0U,
-				    sample_dt_ms
+					sample_dt_ms,
+					(uart_cmd == CMD_MANUAL) ? manual_driving : ((uart_cmd != CMD_NONE) ? 1U : 0U)
 				);
 
 				Telemetry_SendTurn(

@@ -1,0 +1,8 @@
+../Core/Src/telemetry.c:22:16:scale_by_1000	2
+../Core/Src/telemetry.c:30:13:transmit_line	4
+../Core/Src/telemetry.c:46:6:Telemetry_Init	1
+../Core/Src/telemetry.c:57:6:Telemetry_StartCommand	3
+../Core/Src/telemetry.c:86:6:Telemetry_RecordFault	3
+../Core/Src/telemetry.c:113:6:Telemetry_SendEncoder	8
+../Core/Src/telemetry.c:209:6:Telemetry_SendTurn	4
+../Core/Src/telemetry.c:258:6:Telemetry_SendStraight	4
