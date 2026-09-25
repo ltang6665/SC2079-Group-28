@@ -49,9 +49,14 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
  ../Middlewares/Third_Party/FreeRTOS/Source/include/queue.h \
  ../Middlewares/Third_Party/FreeRTOS/Source/include/event_groups.h \
  ../Middlewares/Third_Party/FreeRTOS/Source/include/timers.h \
+<<<<<<< HEAD
  C:/Users/luther\ tang/Desktop/VSC\ files/SC2079-Group-28/STM_stuff/testing_stm/task2_clone/Drivers/PeripheralDriver/Inc/oled.h \
  ../Core/Inc/telemetry.h ../Core/Inc/main.h ../Core/Inc/manual_control.h \
  ../Core/Inc/gyro_safe.h
+=======
+ C:/Users/Luther/Documents/VScode/SC2079_MDP_grp_28/SC2079-Group-28/STM_stuff/testing_stm/task2_clone/Drivers/PeripheralDriver/Inc/oled.h \
+ ../Core/Inc/telemetry.h ../Core/Inc/main.h ../Core/Inc/gyro_safe.h
+>>>>>>> b78963939efb3ad482e4abcafeea4ba8910edf12
 ../Core/Inc/main.h:
 ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal.h:
 ../Core/Inc/stm32f4xx_hal_conf.h:
@@ -103,7 +108,7 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
 ../Middlewares/Third_Party/FreeRTOS/Source/include/queue.h:
 ../Middlewares/Third_Party/FreeRTOS/Source/include/event_groups.h:
 ../Middlewares/Third_Party/FreeRTOS/Source/include/timers.h:
-C:/Users/luther\ tang/Desktop/VSC\ files/SC2079-Group-28/STM_stuff/testing_stm/task2_clone/Drivers/PeripheralDriver/Inc/oled.h:
+C:/Users/Luther/Documents/VScode/SC2079_MDP_grp_28/SC2079-Group-28/STM_stuff/testing_stm/task2_clone/Drivers/PeripheralDriver/Inc/oled.h:
 ../Core/Inc/telemetry.h:
 ../Core/Inc/main.h:
 ../Core/Inc/manual_control.h:
