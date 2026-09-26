@@ -1,0 +1,502 @@
+import math
+import logging
+from threading import Thread, Lock, Event
+from time import time, sleep, time_ns
+logging.basicConfig(level=logging.INFO)
+
+from dotenv import load_dotenv
+load_dotenv()
+
+from communications.android import Android
+from communications.pc import PC
+from communications.stm import STM
+
+from streaming.stream_server import StreamServer
+
+class Task2:
+    """
+    Class for managing Task 2 process.
+    """
+
+    def __init__(self):
+        """
+        Constructor for Task1.
+        Initializes communication with Android tablet, PC, and STM32 microcontroller.
+        """
+        self.process_pc_stream = None
+        self.pc_thread = None
+        self.android_thread = None
+        self.stm_thread = None
+        
+        self.android = Android()
+        self.pc = PC()
+        self.stm = STM()
+        
+        self.lock = Lock()
+        self.obstacle_lock = Lock()
+        self.last_image = None
+        self.prev_image = None
+        self.image_update_event = Event()
+        self.image_seq = 0
+        self.obstacle2_min_image_seq = 0
+        self.expected_image_obstacle = 1
+        
+        self.obstacle_order = []
+        self.num_obstacle = 1
+        self.timeout = 2  # seconds
+        
+        self.on_arrow_callback = None
+        self.obstacle1_direction = None
+        self.obstacle2_direction = None
+        self.ultrasound_travelled_dist1 = None
+        self.ultrasound_travelled_dist2 = None
+        self.ultrasound_stop_dist1 = None
+        self.ultrasound_stop_dist2 = None
+        self.chassis_length = 28
+        self.chassis_width = 19
+        self.obstacle_length = 10
+        self.slide_dist = 50
+        self.turn_bias = 15
+        self.extra_dist = 15
+        self.center_offset_diag = 10
+        self.center_offset_ninty = 7
+        self.ninty_return_bias = 40
+        self.turn_x = 30
+        self.turn_y = 15
+        self.ninty_threshold_length = 110.0
+        self.ninty_threshold_width = 45.0
+        self.sanity_forward_cm = 5
+        self.ir_wall_detect_min_dist = 0.1
+        self.ir_wall_detect_max_age_s = 15.0
+        self.short_obs_threshold = 40
+        self.short_obs_reverse_cm = 10
+        self.last_wall_hug_direction = None
+        self.last_ir_direction = None
+        self.last_ir_timestamp_ns = None
+        
+        self.LEFT_ARROW_ID = "39"
+        self.RIGHT_ARROW_ID = "38"
+        self.directions = {"39": "L", "38": "R"}
+        self.wall_hug_length = None
+        
+        self.start_time = None
+        self.end_time = None
+        
+    def stream_start(self):
+        StreamServer().connect()
+            
+    def android_receive(self) -> None:
+        while True:
+            try:
+                android_msg = self.android.receive()
+
+                if android_msg == "BEGIN":
+                    logging.info("Received BEGIN from Android")
+                    self.start_time = time_ns()
+                    self.ultrasound_forward(28)
+                
+            except OSError as e:
+                print(f"Error: {e}")
+                continue
+            
+    def pc_receive(self) -> None:
+        while True:
+            try:
+                pc_msg = self.pc.receive()
+                if not pc_msg:
+                    continue
+                for raw_msg in pc_msg.splitlines():
+                    msg = raw_msg.strip()
+                    if not msg:
+                        continue
+
+                    if msg == "NONE":
+                        self.set_last_image("NONE")
+                        continue
+
+                    msg_split = [p.strip() for p in msg.split(",")]
+                    obstacle_id = None
+
+                    if len(msg_split) == 2:
+                        conf_str, object_id = msg_split
+                    elif len(msg_split) >= 3:
+                        obs_str, conf_str, object_id = msg_split[:3]
+                        try:
+                            obstacle_id = int(obs_str)
+                        except ValueError:
+                            logging.info(f"Malformed obstacle id from PC message: {msg}")
+                            continue
+                    else:
+                        continue
+
+                    if obstacle_id is not None:
+                        with self.lock:
+                            expected_obstacle = self.expected_image_obstacle
+
+                        if obstacle_id != expected_obstacle:
+                            logging.info(
+                                f"Ignoring stale/future image for obstacle {obstacle_id}; "
+                                f"expecting obstacle {expected_obstacle}."
+                            )
+                            continue
+
+                    confidence_level = None
+                    try:
+                        confidence_level = float(conf_str)
+                    except ValueError:
+                        confidence_level = None
+
+                    if confidence_level:
+                        if self.prev_image == None:
+                            self.prev_image = object_id
+                            self.set_last_image(object_id)
+                        elif self.prev_image == object_id:
+                            self.set_last_image(object_id)
+                            pass
+                        else:
+                            self.prev_image = object_id
+                            self.set_last_image(object_id)
+                    else:
+                        self.set_last_image("NONE")
+
+            except OSError as e:
+                print(f"Error: {e}")
+                continue
+            
+    def stm_receive(self) -> None:
+        while True:
+            try:
+                stm_msg = self.stm.wait_receive()
+                logging.info(f"Received from STM: {stm_msg}")
+                if "OK" in stm_msg:
+                    if self.num_obstacle == 1:
+                        direction = self.get_last_image()
+                        logging.info(f"DIR: {direction}")
+                        if direction in self.directions:
+                            self.obstacle1_callback(direction)
+                        else:
+                            self.on_arrow_callback = self.obstacle1_callback
+                        self._prime_obstacle2_direction_window()
+                        self.pc.send("SEEN")
+
+                    elif self.num_obstacle == 2:
+                        with self.lock:
+                            direction = self.last_image
+                            current_seq = self.image_seq
+                            min_seq = self.obstacle2_min_image_seq
+
+                        if direction in self.directions and current_seq > min_seq:
+                            self.obstacle2_callback(direction)
+                        else:
+                            if direction in self.directions:
+                                logging.info(
+                                    f"Obstacle 2 direction {direction} is stale "
+                                    f"(seq={current_seq}, min_seq={min_seq}); waiting {self.timeout}s."
+                                )
+                            else:
+                                logging.info(
+                                    f"Obstacle 2 direction unavailable ({direction}); waiting {self.timeout}s."
+                                )
+
+                            fresh_direction = self._wait_for_fresh_direction(min_seq, self.timeout)
+                            if fresh_direction in self.directions:
+                                self.obstacle2_callback(fresh_direction)
+                            else:
+                                logging.info(
+                                    "No fresh obstacle-2 direction received before timeout; "
+                                    "arming async callback."
+                                )
+                                self.on_arrow_callback = self.obstacle2_callback
+                            
+                    elif self.num_obstacle == 3:
+                        with self.lock:
+                            direction = self.obstacle2_direction
+
+                        # Use the obstacle-2 confirmed direction as the carpark reference.
+                        # Fallback to latest image only if obstacle2_direction is unavailable.
+                        if direction not in ("L", "R"):
+                            latest = self.get_last_image()
+                            if latest in self.directions:
+                                direction = self.directions[latest]
+                                logging.info(
+                                    f"Carpark direction fallback from latest image: {direction}"
+                                )
+                            else:
+                                logging.info(
+                                    f"Carpark direction unavailable (latest={latest}); defaulting to L."
+                                )
+                                direction = "L"
+
+                        carpark_turn_direction = "L" if direction == "R" else "R"
+                        self.perform_carpark(
+                            carpark_turn_direction,
+                            sanity_side=direction
+                        )
+                        self.pc.send("STITCH")
+                    
+                    with self.obstacle_lock:
+                        if self.num_obstacle == 4:
+                            logging.info(f"Timing: {(time_ns() - self.start_time) / 1e9:.3}s")
+                        self.num_obstacle += 1
+                elif stm_msg.startswith("ir"):
+                    dist = stm_msg.split("ir")[1].replace("\n", "")
+                    try:
+                        dist = float(dist)
+                    except:
+                        logging.info(f"Couldn't cast WH dist {dist} to float")
+                        continue 
+                    self.wall_hug_length = dist
+                    self.last_ir_direction = self.last_wall_hug_direction
+                    self.last_ir_timestamp_ns = time_ns()
+                elif stm_msg.startswith("us"):
+                    stm_msg = stm_msg.replace("us", "").replace("\n", "")
+                    dist = stm_msg.split(",")
+                    try:
+                        for i in range(2):
+                            dist[i] = float(dist[i])
+                    except:
+                        logging.info(f"Couldn't cast US travelled dist {dist} to float")
+                        continue
+                    if self.num_obstacle == 1:
+                        self.ultrasound_travelled_dist1 = dist[0]
+                        self.ultrasound_stop_dist1 = dist[1]
+                        logging.info(f"Set ultrasound_travelled_dist1 to {dist[0]} and ultrasound_stop_dist1 to {dist[1]}")
+                    elif self.num_obstacle == 2:
+                        self.ultrasound_travelled_dist2 = dist[0]
+                        self.ultrasound_stop_dist2 = dist[1]
+                        logging.info(f"Set ultrasound_travelled_dist2 to {dist[0]} and ultrasound_stop_dist2 to {dist[1]}")
+                    
+            except OSError as e:
+                print(f"Error: {e}")
+                continue
+            
+    def turn_and_go(self, full_length, half_width):
+        """
+        Returns (turn_degrees, distance)
+        turn_degrees is positive for left, negative for right.
+        """
+        angle_rad = math.atan2(abs(half_width), full_length)
+        angle_deg = math.degrees(angle_rad)
+        distance = math.hypot(full_length, half_width)
+        return abs(angle_deg), int(distance)
+
+    def ultrasound_forward(self, distance_to_stop, send = True):
+        cmd = f"FU{str(distance_to_stop)}"
+        if send:
+            self.stm.send(cmd + "\n")
+        return cmd
+        
+    def perform_turn1(self, direction, send = True):
+        opp_dir = "L" if direction == "R" else "R"
+        cmd = "S" + direction + ",S"
+        cmd += ",S" + opp_dir  + ",S"
+        cmd += "," + self.ultrasound_forward(32, False)
+        if send:
+            self.stm.send(cmd + "\n")
+        return cmd
+        
+    def wall_hug(self, direction, send = True):
+        cmd = "FI" + direction
+        self.last_wall_hug_direction = direction
+        if send:
+            self.stm.send(cmd + "\n")
+        return cmd
+
+    def should_add_pre_turn_sanity_forward(self, side):
+        if self.wall_hug_length is None:
+            logging.info("Pre-turn IR sanity check skipped: no IR reading available.")
+            return False
+
+        if self.last_ir_direction != side:
+            logging.info(
+                f"Pre-turn IR sanity check skipped: last IR side={self.last_ir_direction}, required side={side}."
+            )
+            return False
+
+        if self.last_ir_timestamp_ns is not None:
+            age_s = (time_ns() - self.last_ir_timestamp_ns) / 1e9
+            if age_s > self.ir_wall_detect_max_age_s:
+                logging.info(
+                    f"Pre-turn IR sanity check skipped: stale IR reading ({age_s:.2f}s old)."
+                )
+                return False
+
+        wall_detected = self.wall_hug_length > self.ir_wall_detect_min_dist
+        logging.info(
+            f"Pre-turn IR sanity check side={side}: dist={self.wall_hug_length}, detected={wall_detected}"
+        )
+        return wall_detected
+        
+    def perform_turn2(self, direction, send = True):
+        cmd = "F" + direction + "90"
+        opp_dir = "L" if direction == "R" else "R"
+        cmd += "," + self.wall_hug(opp_dir, False) + ",F2"
+        cmd += "," + "F" + opp_dir + "90,F3,F" + opp_dir + "90" + ",FI" + opp_dir + "O"
+        cmd += "," + self.wall_hug(opp_dir, False)
+        #add back the old code
+        
+        if send:
+            self.stm.send(cmd + "\n")
+        return cmd
+        
+    def perform_carpark(self, direction, sanity_side = None, send = True):
+        obs_1_to_2 = self.ultrasound_travelled_dist2 + self.ultrasound_stop_dist2 + self.slide_dist
+        logging.info(f"Obs 1 to 2 dist: {obs_1_to_2}")
+        logging.info(f"Obs 2 Length: {self.wall_hug_length}")
+        full_length = self.chassis_length + self.ultrasound_travelled_dist1 + self.ultrasound_stop_dist1 \
+            + obs_1_to_2
+        logging.info(f"Estimated Length: {full_length}")
+            
+        half_width = ((self.wall_hug_length) / 2.0) + self.turn_bias + self.extra_dist + self.center_offset_diag
+        logging.info(f"Estimated Width: {half_width}")
+        
+        # Always do 90/90 return (diagonal return disabled).
+        forward_dist = int(round(full_length - self.chassis_length - self.ninty_return_bias))
+        forward_dist_cmd = f"F{forward_dist}," if forward_dist > 0 else ""
+        if not forward_dist_cmd:
+            logging.info(f"Omitting non-positive forward_dist command: F{forward_dist}")
+        opp_dir = "L" if direction == "R" else "R"
+        if sanity_side not in ("L", "R"):
+            sanity_side = opp_dir
+            logging.info(f"Sanity side fallback to {sanity_side}")
+        else:
+            logging.info(f"Sanity side set from obstacle 2 direction: {sanity_side}")
+
+        is_short_obs = (self.wall_hug_length is not None
+                        and self.wall_hug_length < self.short_obs_threshold)
+        if is_short_obs:
+            logging.info(f"Short obstacle detected ({self.wall_hug_length}cm < {self.short_obs_threshold}cm): using reverse+FIRO+FIR alignment")
+            final_alignment_cmd = (f"R{self.short_obs_reverse_cm},"
+                                   f"FI{sanity_side},S,"
+                                   f"F{self.sanity_forward_cm},S,F{opp_dir}90,")
+        else:
+            sanity_forward_cmd = (
+                f"F{self.sanity_forward_cm}"
+                if self.should_add_pre_turn_sanity_forward(sanity_side)
+                else ""
+            )
+            final_ir_cmd = self.wall_hug(sanity_side, False)
+            if sanity_forward_cmd:
+                final_alignment_cmd = f"{final_ir_cmd},S,{sanity_forward_cmd},S,F{opp_dir}90,"
+            else:
+                final_alignment_cmd = f"{final_ir_cmd},S,F{opp_dir}90,"
+        if self.turn_x + self.turn_y > half_width - self.center_offset_ninty:
+            back_dist = int(round(self.turn_x + self.turn_y - (half_width - self.center_offset_ninty)))
+            if back_dist > 0: # if need to go back
+                cmd = f"F{direction}90,{forward_dist_cmd}F{direction}90,R{back_dist},{final_alignment_cmd}" + "FX22"
+            else: # perfect, dont go back
+                cmd = f"F{direction}90,{forward_dist_cmd}F{direction}90,{final_alignment_cmd}" + "FX22"
+        else: # no need go back
+            turn_forward_dist = int(round(half_width - self.center_offset_diag - self.turn_x - self.turn_y))
+            turn_forward_cmd = f"F{turn_forward_dist}," if turn_forward_dist > 0 else ""
+            if not turn_forward_cmd:
+                logging.info(f"Omitting non-positive turn_forward_dist command: F{turn_forward_dist}")
+            cmd = f"F{direction}90,{forward_dist_cmd}F{direction}90,{turn_forward_cmd}{final_alignment_cmd}" + "FX22"
+        if send:
+            self.stm.send(cmd + '\n')
+        return cmd
+            
+    def obstacle1_callback(self, direction):
+        direction = self.directions[direction]
+        logging.info(f"Calling obstacle 1 turn with direction {direction}")
+
+        with self.lock:
+            self.obstacle1_direction = direction
+
+        self.perform_turn1(direction)
+        
+        self.on_arrow_callback = None
+        
+    def obstacle2_callback(self, direction):
+        direction = self.directions[direction]
+
+        logging.info(f"Calling obstacle 2 turn with direction {direction}")
+        with self.lock:
+            self.obstacle2_direction = direction
+            
+        self.perform_turn2(direction)
+        self.on_arrow_callback = None
+
+    def _prime_obstacle2_direction_window(self) -> None:
+        with self.lock:
+            self.last_image = "NONE"
+            self.prev_image = None
+            self.image_seq += 1
+            self.obstacle2_min_image_seq = self.image_seq
+            self.expected_image_obstacle = 2
+
+        self.image_update_event.clear()
+        logging.info(
+            f"Primed obstacle-2 direction window (min_seq={self.obstacle2_min_image_seq})."
+        )
+
+    def _wait_for_fresh_direction(self, min_seq: int, timeout_s: float):
+        deadline = time() + timeout_s
+        while True:
+            with self.lock:
+                current_image = self.last_image
+                current_seq = self.image_seq
+
+            if current_seq > min_seq and current_image in self.directions:
+                logging.info(
+                    f"Using fresh obstacle-2 image {current_image} "
+                    f"(seq={current_seq}, min_seq={min_seq})."
+                )
+                return current_image
+
+            remaining = deadline - time()
+            if remaining <= 0:
+                return None
+
+            self.image_update_event.wait(timeout=min(remaining, 0.2))
+            self.image_update_event.clear()
+            
+    def get_last_image(self) -> str:
+        with self.lock:
+            image = self.last_image
+        logging.info(f"Returning last_image as {image}")
+        return image
+
+    def set_last_image(self, img) -> None:
+        with self.lock:
+            self.last_image = img
+            self.image_seq += 1
+
+        self.image_update_event.set()
+
+        if self.on_arrow_callback and img in self.directions:
+            self.on_arrow_callback(img)
+
+    def start(self):
+        """
+        Run Task 1: communicate with Android, PC, and STM32.
+        """
+        logging.info("Starting Task 1.")
+        self.android.start()
+        self.pc.connect()
+        self.stm.connect()
+        
+        self.process_pc_stream = Thread(target=self.stream_start)
+        self.process_pc_stream.start()
+        sleep(5)
+        
+        self.stm_thread = Thread(target=self.stm_receive)
+        self.pc_thread = Thread(target=self.pc_receive)
+        self.android_thread = Thread(target=self.android_receive)
+        self.stm_thread.start()
+        self.pc_thread.start()
+        self.android_thread.start()
+        # enter = input("Press Enter")
+        # self.start_time = time_ns()
+        # self.ultrasound_forward(24)
+        
+        self.stm_thread.join()
+        self.pc_thread.join()
+        self.android_thread.join()
+
+        logging.info("Task 2 completed.")
+        
+if __name__ == "__main__":
+    task1 = Task2()
+    task1.start()
+    
