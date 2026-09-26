@@ -491,7 +491,8 @@ def plot_run(
         ax_steering.plot(
             straight_relative,
             run["servo_ccr"],
-            label="Actual servo CCR"
+            label="Actual servo CCR",
+            color="tab:blue",
         )
 
         if any(math.isfinite(v) for v in run["servo_center_ccr"]):
@@ -499,7 +500,8 @@ def plot_run(
                 straight_relative,
                 run["servo_center_ccr"],
                 label="Servo centre CCR",
-                linestyle="--"
+                linestyle="--",
+                color="tab:orange",
             )
 
         ax_steering.set_title(
@@ -516,7 +518,8 @@ def plot_run(
             ax_steer_percent.plot(
                 straight_relative,
                 run["steer_cmd_percent"],
-                label="Steering command"
+                label="Steering command",
+                color="tab:green",
             )
 
         ax_steer_percent.set_ylabel("Steering command (%)")

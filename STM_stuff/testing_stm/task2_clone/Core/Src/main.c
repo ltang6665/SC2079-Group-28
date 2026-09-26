@@ -235,6 +235,24 @@ volatile int32_t target_counts = 0; // +ve forward, -ve reverse
 #define REV_LEFT_COMPARE_SCALE   0.980f
 #define REV_RIGHT_COMPARE_SCALE  1.000f
 
+/*
+ * Straight motion profile. luther
+ *
+ * ACCEL_RAMP_MS:
+ *     Time taken to ramp from zero drive to 100% drive.
+ *
+ * DECEL_CM:
+ *     Distance before the target at which planned deceleration begins.
+ *
+ * DECEL_MIN_PERCENT:
+ *     Lowest drive level before the final brake.
+ *     Keeping this above zero reduces the chance of stalling before
+ *     reaching target_counts.
+ */
+#define STRAIGHT_ACCEL_RAMP_MS       700U
+#define STRAIGHT_DECEL_CM             20.0f
+#define STRAIGHT_DECEL_MIN_PERCENT    20.0f
+
 /* --- Closed-loop yaw turn controller ------------------------------------- luther
  *
  * Motor PWM is inverted by the H-bridge wiring used below:
@@ -2751,6 +2769,16 @@ void motorTask(void const * argument)
       static float cpsA_f = 0.0f;
       static float cpsB_f = 0.0f;
 
+      /*
+       * Straight speed-profile state. luther
+       *
+       * 0%   -> essentially zero motor drive
+       * 100% -> calibrated PWM_RUN motor drive
+       */
+      static float drive_profile_percent = 0.0f;
+      static uint32_t drive_profile_last_tick = 0U;
+      static int drive_profile_direction = 0;
+
       /* 32-bit segment distance accumulator. The hardware encoder counters are
        * only 16-bit, so subtracting the command-start counter directly fails
        * once a move exceeds about 32767 encoder counts (roughly 4.4 m here).
@@ -2765,15 +2793,26 @@ void motorTask(void const * argument)
       uint16_t now_a = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
       uint16_t now_b = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
       const int commanded_direction = (uart_cmd == CMD_REVERSE) ? -1 : 1;
+      uint32_t profile_now = HAL_GetTick();
 
       if (!dist_initialized || seg_rebase || dist_direction != commanded_direction)
       {
-        dist_last_a = now_a;
-        dist_last_b = now_b;
-        dist_accum_a = 0;
-        dist_accum_b = 0;
-        dist_direction = commanded_direction;
-        dist_initialized = 1U;
+    	  dist_last_a = now_a;
+		  dist_last_b = now_b;
+
+		  dist_accum_a = 0;
+		  dist_accum_b = 0;
+
+		  dist_direction = commanded_direction;
+		  dist_initialized = 1U;
+
+		  /*
+		   * New movement: luther
+		   * begin from zero drive instead of immediately applying PWM_RUN.
+		   */
+		  drive_profile_percent = 0.0f;
+		  drive_profile_last_tick = profile_now;
+		  drive_profile_direction = commanded_direction;
       }
       else
       {
@@ -2783,7 +2822,34 @@ void motorTask(void const * argument)
         dist_last_b = now_b;
       }
 
+      uint32_t profile_dt_ms = profile_now - drive_profile_last_tick;
+
+      drive_profile_last_tick = profile_now;
+
+      /* Prevent an unusual task delay from making one giant ramp step. luther */
+      if (profile_dt_ms > 50U)
+      {
+          profile_dt_ms = 50U;
+      }
+
       int32_t avg_moved = (dist_accum_a + dist_accum_b) / 2;
+
+      // Remaining distance in encoder counts. Keep it positive regardless of FWD/REV direction. luther
+      int32_t remaining_counts;
+
+      if (commanded_direction > 0)
+      {
+          remaining_counts = target_counts - avg_moved;
+      }
+      else
+      {
+          remaining_counts = avg_moved - target_counts;
+      }
+
+      if (remaining_counts < 0)
+      {
+          remaining_counts = 0;
+      }
 
       // ====== Stop conditions ======
       bool done_by_counts = false;
@@ -3039,11 +3105,112 @@ void motorTask(void const * argument)
        * drive (PWM_MAX) to that already-calibrated full-speed point. At 100%
        * the values are exactly the same as a normal scripted F/R command.
        */
+      //start new acceleration luther
       const bool is_reverse = (uart_cmd == CMD_REVERSE);
+
+      const bool manual_straight =
+          manual_control.owns_motors &&
+          manual_motion_kind == MANUAL_MOTION_STRAIGHT;
+
+      /*
+       * Requested level before applying the scripted acceleration/deceleration
+       * profile.
+       */
+      float requested_percent = manual_straight ? (float)manual_throttle_percent : 100.0f;
+
+      /*
+       * Apply the automatic motion profile only to normal finite F/R commands.
+       *
+       * Emergency/obstacle/manual stops should retain their immediate safety
+       * behaviour.
+       */
+      const bool finite_scripted_move =
+          !manual_straight &&
+          obstacle_stop_mode == OBST_MODE_NONE &&
+          target_counts != INT32_MAX &&
+          target_counts != (INT32_MIN + 1);
+
+      float profile_target = requested_percent;
+
+      if (finite_scripted_move)
+      {
+          /*
+           * Planned deceleration during the last STRAIGHT_DECEL_CM.
+           */
+          const float decel_counts =
+              STRAIGHT_DECEL_CM * COUNTS_PER_CM;
+
+          if ((float)remaining_counts < decel_counts)
+          {
+              float remaining_fraction =
+                  (float)remaining_counts / decel_counts;
+
+              if (remaining_fraction < 0.0f)
+                  remaining_fraction = 0.0f;
+
+              if (remaining_fraction > 1.0f)
+                  remaining_fraction = 1.0f;
+
+              /*
+               * 100% at start of deceleration zone,
+               * DECEL_MIN_PERCENT at the target.
+               */
+              float decel_percent =
+                  STRAIGHT_DECEL_MIN_PERCENT +
+                  (100.0f - STRAIGHT_DECEL_MIN_PERCENT) *
+                  remaining_fraction;
+
+              if (decel_percent < profile_target)
+              {
+                  profile_target = decel_percent;
+              }
+          }
+
+          /*
+           * Acceleration slew:
+           *
+           * 0 -> 100% over STRAIGHT_ACCEL_RAMP_MS.
+           */
+          float accel_step =
+              100.0f *
+              (float)profile_dt_ms /
+              (float)STRAIGHT_ACCEL_RAMP_MS;
+
+          if (drive_profile_percent < profile_target)
+          {
+              drive_profile_percent += accel_step;
+
+              if (drive_profile_percent > profile_target)
+              {
+                  drive_profile_percent = profile_target;
+              }
+          }
+          else
+          {
+              /*
+               * Deceleration target moves gradually as remaining distance
+               * decreases, so follow it directly.
+               */
+              drive_profile_percent = profile_target;
+          }
+      }
+      else
+      {
+          /*
+           * Manual/obstacle modes keep existing behaviour for now.
+           */
+          drive_profile_percent = requested_percent;
+      }
+
+      if (drive_profile_percent < 0.0f)
+          drive_profile_percent = 0.0f;
+
+      if (drive_profile_percent > 100.0f)
+          drive_profile_percent = 100.0f;
+
       const int throttle_percent =
-          (manual_control.owns_motors && manual_motion_kind == MANUAL_MOTION_STRAIGHT)
-              ? manual_throttle_percent
-              : 100;
+          (int)(drive_profile_percent + 0.5f);
+      //end new acceleration luther
 
       const float left_compare_scale =
           is_reverse ? REV_LEFT_COMPARE_SCALE : FWD_LEFT_COMPARE_SCALE;
