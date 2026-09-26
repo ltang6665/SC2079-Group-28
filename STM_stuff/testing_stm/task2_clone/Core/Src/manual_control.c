@@ -2,7 +2,7 @@
 #include <stddef.h>
 #include <string.h>
 
-static const ManualSetpoint stopped = {0, 0, 0, 0};
+static const ManualSetpoint stopped = {0, 0, 0};
 
 static int sign_of(int value)
 {
@@ -39,7 +39,6 @@ static bool read_signed(const char **cursor, int maximum, int *result)
     int polarity = 1;
     skip_space(cursor);
     if (**cursor == '-') { polarity = -1; ++*cursor; }
-    /* Reject an empty sign or a sign separated from its number. */
     if (**cursor < '0' || **cursor > '9') return false;
     if (!read_number(cursor, (uint32_t)maximum, &magnitude)) return false;
     *result = polarity * (int)magnitude;
@@ -48,24 +47,30 @@ static bool read_signed(const char **cursor, int maximum, int *result)
 
 static bool valid_setpoint(ManualSetpoint s)
 {
-    if (s.direction < -1 || s.direction > 1 || s.steering < -100 || s.steering > 100 ||
-        s.left_effort < 0 || s.left_effort > MANUAL_MAX_EFFORT ||
-        s.right_effort < 0 || s.right_effort > MANUAL_MAX_EFFORT) return false;
+    if (s.direction < -1 || s.direction > 1 ||
+        s.steering < -100 || s.steering > 100 ||
+        s.throttle_percent < 0 || s.throttle_percent > MANUAL_MAX_THROTTLE)
+        return false;
+
     if (s.direction == 0)
-        return s.steering == 0 && s.left_effort == 0 && s.right_effort == 0;
-    return s.left_effort > 0 || s.right_effort > 0;
+        return s.steering == 0 && s.throttle_percent == 0;
+
+    return s.throttle_percent > 0;
 }
 
 bool Manual_ParseLine(const char *line, ManualMessage *message)
 {
     ManualMessage parsed = {0};
     const char *p;
-    uint32_t left, right;
+    uint32_t throttle;
+
     if (line == NULL || message == NULL) return false;
+
     if (strncmp(line, "jbegin ", 7U) == 0) {
         p = line + 7;
         parsed.type = MANUAL_BEGIN;
-        if (!read_number(&p, UINT32_MAX, &parsed.session) || parsed.session == 0U) return false;
+        if (!read_number(&p, UINT32_MAX, &parsed.session) || parsed.session == 0U)
+            return false;
     } else if (strncmp(line, "j ", 2U) == 0) {
         p = line + 2;
         parsed.type = MANUAL_FRAME;
@@ -73,14 +78,15 @@ bool Manual_ParseLine(const char *line, ManualMessage *message)
             !read_number(&p, UINT32_MAX, &parsed.sequence) || parsed.sequence == 0U ||
             !read_signed(&p, 1, &parsed.setpoint.direction) ||
             !read_signed(&p, 100, &parsed.setpoint.steering) ||
-            !read_number(&p, MANUAL_MAX_EFFORT, &left) ||
-            !read_number(&p, MANUAL_MAX_EFFORT, &right)) return false;
-        parsed.setpoint.left_effort = (int)left;
-        parsed.setpoint.right_effort = (int)right;
+            !read_number(&p, MANUAL_MAX_THROTTLE, &throttle))
+            return false;
+
+        parsed.setpoint.throttle_percent = (int)throttle;
         if (!valid_setpoint(parsed.setpoint)) return false;
     } else {
         return false;
     }
+
     skip_space(&p);
     if (*p != '\0') return false;
     *message = parsed;
@@ -115,14 +121,20 @@ bool Manual_Tick(ManualControl *control, uint32_t now_ms)
 bool Manual_Accept(ManualControl *control, const ManualMessage *message, uint32_t now_ms)
 {
     uint32_t advance;
-    /* Check expiry BEFORE a late frame can refresh the timestamp. */
+
     (void)Manual_Tick(control, now_ms);
-    if (!control->owns_motors || control->locked || message->type != MANUAL_FRAME ||
-        message->session != control->session || message->sequence == 0U ||
-        !valid_setpoint(message->setpoint)) return false;
+    if (!control->owns_motors || control->locked ||
+        message->type != MANUAL_FRAME ||
+        message->session != control->session ||
+        message->sequence == 0U ||
+        !valid_setpoint(message->setpoint))
+        return false;
+
     advance = message->sequence - control->last_sequence;
-    if (control->have_sequence && (advance == 0U || advance >= 0x80000000U)) return false;
-    if (!control->neutral_seen && message->setpoint.direction != 0) return false;
+    if (control->have_sequence && (advance == 0U || advance >= 0x80000000U))
+        return false;
+    if (!control->neutral_seen && message->setpoint.direction != 0)
+        return false;
 
     if (message->setpoint.direction != 0 &&
         (message->setpoint.direction != control->requested.direction ||
@@ -140,13 +152,15 @@ bool Manual_Accept(ManualControl *control, const ManualMessage *message, uint32_
 ManualSetpoint Manual_Output(const ManualControl *control, uint32_t now_ms)
 {
     ManualSetpoint output;
+
     if (!control->owns_motors || control->locked ||
-        (uint32_t)(now_ms - control->last_update_ms) >= MANUAL_WATCHDOG_MS) return stopped;
+        (uint32_t)(now_ms - control->last_update_ms) >= MANUAL_WATCHDOG_MS)
+        return stopped;
+
     output = control->requested;
     if (output.direction != 0 && (int32_t)(now_ms - control->drive_after_ms) < 0) {
         output.direction = 0;
-        output.left_effort = 0;
-        output.right_effort = 0;
+        output.throttle_percent = 0;
         /* Keep requested steering while the wheels brake and the servo settles. */
     }
     return output;

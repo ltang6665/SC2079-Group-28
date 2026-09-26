@@ -2,10 +2,10 @@
 ../Core/Src/manual_control.c:13:13:skip_space	3
 ../Core/Src/manual_control.c:18:13:read_number	10
 ../Core/Src/manual_control.c:36:13:read_signed	5
-../Core/Src/manual_control.c:49:13:valid_setpoint	15
-../Core/Src/manual_control.c:59:6:Manual_ParseLine	17
-../Core/Src/manual_control.c:90:6:Manual_Init	1
-../Core/Src/manual_control.c:95:6:Manual_Begin	1
-../Core/Src/manual_control.c:104:6:Manual_Tick	4
-../Core/Src/manual_control.c:115:6:Manual_Accept	15
-../Core/Src/manual_control.c:140:16:Manual_Output	6
+../Core/Src/manual_control.c:48:13:valid_setpoint	10
+../Core/Src/manual_control.c:61:6:Manual_ParseLine	16
+../Core/Src/manual_control.c:96:6:Manual_Init	1
+../Core/Src/manual_control.c:101:6:Manual_Begin	1
+../Core/Src/manual_control.c:110:6:Manual_Tick	4
+../Core/Src/manual_control.c:121:6:Manual_Accept	15
+../Core/Src/manual_control.c:152:16:Manual_Output	6

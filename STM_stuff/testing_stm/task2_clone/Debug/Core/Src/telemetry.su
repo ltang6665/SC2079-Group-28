@@ -5,4 +5,4 @@
 ../Core/Src/telemetry.c:86:6:Telemetry_RecordFault	56	static,ignoring_inline_asm
 ../Core/Src/telemetry.c:113:6:Telemetry_SendEncoder	192	static,ignoring_inline_asm
 ../Core/Src/telemetry.c:209:6:Telemetry_SendTurn	272	static,ignoring_inline_asm
-../Core/Src/telemetry.c:258:6:Telemetry_SendStraight	248	static,ignoring_inline_asm
+../Core/Src/telemetry.c:258:6:Telemetry_SendStraight	264	static,ignoring_inline_asm

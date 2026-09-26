@@ -37,6 +37,8 @@ void Telemetry_SendStraight(
     float yaw_rate_dps,
     float error_deg,
     int servo_ccr,
+    int servo_center_ccr,
+    float steer_percent,
     int left_pwm,
     int right_pwm,
     uint8_t straight_active

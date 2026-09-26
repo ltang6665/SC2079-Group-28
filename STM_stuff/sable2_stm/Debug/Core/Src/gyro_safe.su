@@ -1,8 +1,0 @@
-../Core/Src/gyro_safe.c:21:13:write_reg	32	static
-../Core/Src/gyro_safe.c:40:13:read_regs	40	static
-../Core/Src/gyro_safe.c:59:13:select_bank	16	static
-../Core/Src/gyro_safe.c:65:13:read_raw_z	24	static
-../Core/Src/gyro_safe.c:79:6:GyroSafe_Init	24	static
-../Core/Src/gyro_safe.c:128:6:GyroSafe_Recover	16	static
-../Core/Src/gyro_safe.c:147:6:GyroSafe_Calibrate	56	static
-../Core/Src/gyro_safe.c:173:6:GyroSafe_ReadRateDps	32	static

@@ -47,6 +47,9 @@ CSV_FIELDS = [
     "left_pwm",
     "right_pwm",
     "servo_ccr",
+    "servo_center_ccr",
+    "servo_offset_ccr",
+    "steer_cmd_percent",
     "turn_phase",
     "fault_code",
 ]
@@ -166,13 +169,41 @@ def decode_line(
             )
             return row, reset
 
-        # Optional straight telemetry:
+        # Straight telemetry
+        #
+        # Old format:
         # STR,tick,id,yaw,target,rate,error,servo,left_pwm,right_pwm
-        if kind == "STR" and len(parts) == 10:
+        #
+        # New format:
+        # STR,tick,id,yaw,target,rate,error,
+        #     servo,center,steer_percent,left_pwm,right_pwm
+
+        if kind == "STR" and len(parts) in (10, 12):
             tick = int(parts[1])
             session_id, reset = tracker.observe(tick)
 
             row = empty_record()
+
+            servo_ccr = int(parts[7])
+
+            if len(parts) == 12:
+                # New telemetry format
+                servo_center = int(parts[8])
+                steer_percent = scaled_angle(parts[9])
+                left_pwm = int(parts[10])
+                right_pwm = int(parts[11])
+
+                servo_offset = servo_ccr - servo_center
+
+            else:
+                # Old telemetry format compatibility
+                servo_center = ""
+                servo_offset = ""
+                steer_percent = ""
+
+                left_pwm = int(parts[8])
+                right_pwm = int(parts[9])
+
             row.update(
                 host_time=time.time(),
                 session_id=session_id,
@@ -183,12 +214,16 @@ def decode_line(
                 target_deg=scaled_angle(parts[4]),
                 yaw_rate_dps=scaled_angle(parts[5]),
                 turn_error_deg=scaled_angle(parts[6]),
-                servo_ccr=int(parts[7]),
-                left_pwm=int(parts[8]),
-                right_pwm=int(parts[9]),
+                servo_ccr=servo_ccr,
+                servo_center_ccr=servo_center,
+                servo_offset_ccr=servo_offset,
+                steer_cmd_percent=steer_percent,
+                left_pwm=left_pwm,
+                right_pwm=right_pwm,
             )
-            return row, reset
 
+            return row, reset
+        
         # Optional fault telemetry: FLT,tick,id,code
         if kind == "FLT" and len(parts) == 4:
             tick = int(parts[1])

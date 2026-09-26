@@ -4,17 +4,19 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* Firmware limits. Normal movement tuning is in robot_gamepad.py. */
+/* Manual-control safety/protocol limits.
+ * Motor PWM, wheel scaling, steering ratios, and other motion tuning stay in
+ * the STM32 motion-control code; the gamepad sends only operator intent.
+ */
 #define MANUAL_WATCHDOG_MS       300U
 #define MANUAL_TRANSITION_MS     120U
-#define MANUAL_MAX_EFFORT        3500
+#define MANUAL_MAX_THROTTLE      100
 #define MANUAL_LINE_SIZE         96U
 
 typedef struct {
-    int direction;      /* -1 reverse, 0 brake, +1 forward */
-    int steering;       /* -100 left .. +100 right */
-    int left_effort;    /* positive drive, NOT raw/inverted PWM compare */
-    int right_effort;
+    int direction;        /* -1 reverse, 0 brake, +1 forward */
+    int steering;         /* -100 left .. +100 right */
+    int throttle_percent; /* 0..100 operator demand, not PWM/effort */
 } ManualSetpoint;
 
 typedef enum { MANUAL_BEGIN, MANUAL_FRAME } ManualMessageType;

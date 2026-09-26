@@ -265,7 +265,7 @@ volatile float arc_target_angle = 0.0f;
 #define TURN_TIMEOUT_PER_DEG_MS        80U
 
 #define GYRO_PERIOD_MS                10U
-#define GYRO_RATE_DEADBAND_DPS         0.50f
+#define GYRO_RATE_DEADBAND_DPS         0.20f
 #define GYRO_STALE_TIMEOUT_MS         100U
 #define GYRO_RETRY_DELAY_MS          1000U
 #define GYRO_MAX_CONSECUTIVE_FAILURES   3U
@@ -304,9 +304,17 @@ volatile turn_t cmd_turn = TURN_NONE;
 
 #define SPEED_LPF_TAU 0.05f // ~0.2 s LPF for encoder speed
 
+/* Straight-line heading hold. These values act on the steering servo only;
+ * wheel-speed PI remains responsible for balancing encoder speeds. */
+#define STRAIGHT_STEER_KP_PERCENT_PER_DEG  5.0f
+#define STRAIGHT_STEER_DEADBAND_DEG        0.10f
+#define STRAIGHT_STEER_MIN_PERCENT         5.0f
+#define STRAIGHT_STEER_MAX_PERCENT        70.0f
+
 /* float is atomic on this STM32 and has ample precision for robot yaw. */
 volatile float total_angle = 0.0f;  // updated in gyroTask
-volatile float target_angle = 0.0f; // locked when a straight move starts
+/* Heading captured when a straight F/R movement begins. */
+volatile float target_angle = 0.0f;
 volatile float error_angle = 0.0f;  // computed in motorTask
 volatile float TURN_DEG = 90.0f;
 
@@ -335,6 +343,15 @@ volatile int turn_right_pwm = PWM_MAX;
 volatile int straight_left_pwm = PWM_MAX;
 volatile int straight_right_pwm = PWM_MAX;
 volatile int straight_servo_ccr = SERVO_CENTER_CCR;
+volatile int straight_servo_center_ccr = SERVO_CENTER_CCR;
+
+/*
+ * Actual physical steering request:
+ *   negative = left
+ *   positive = right
+ *   units = percent of available servo travel
+ */
+volatile float straight_steer_percent = 0.0f;
 
 static float turn_i_error_deg_s = 0.0f;
 static uint32_t turn_pid_last_tick = 0U;
@@ -737,7 +754,9 @@ static void finish_turn_command(int completed_command)
 
 /* ---------------- luther Hold-to-drive manual mode ----------------
  * UART ISR only copies lines. motorTask owns this state and all motor writes.
- * A newer heartbeat replaces an older one; there is no movement command queue.
+ * The gamepad sends intent only: direction, steering percentage and throttle.
+ * PWM, feed-forward scaling, wheel PI, servo calibration and turn ratios remain
+ * STM32-owned so full gamepad movements match the scripted motion tuning.
  */
 static ManualControl manual_control;
 static volatile uint8_t manual_uart_owned = 0U;
@@ -746,6 +765,17 @@ static volatile char manual_rx_line[MANUAL_LINE_SIZE];
 static volatile uint8_t manual_driving = 0U;
 static int manual_last_steer = 0;
 static int manual_telemetry_kind = 0;
+static int manual_throttle_percent = 0;
+static int manual_motion_direction = 0;
+
+typedef enum
+{
+    MANUAL_MOTION_STOP = 0,
+    MANUAL_MOTION_STRAIGHT,
+    MANUAL_MOTION_TURN
+} manual_motion_kind_t;
+
+static manual_motion_kind_t manual_motion_kind = MANUAL_MOTION_STOP;
 static char manual_reply_pending[80];
 static char manual_reply_tx[80];
 
@@ -761,7 +791,6 @@ static void manual_publish_line(const char *line)
 
 static void manual_queue_reply(const char *text)
 {
-    /* Both this pending buffer and the active TX buffer are task-owned. */
     (void)snprintf(manual_reply_pending, sizeof(manual_reply_pending), "%s", text);
 }
 
@@ -774,7 +803,7 @@ static void manual_flush_reply(void)
                             (uint16_t)strlen(manual_reply_tx)) == HAL_OK) {
         manual_reply_pending[0] = '\0';
     } else {
-        uart3_tx_busy = 0U; /* Keep the pending reply and retry on the next motor tick. */
+        uart3_tx_busy = 0U;
     }
 }
 
@@ -793,10 +822,14 @@ static void manual_exit(void)
     manual_line_pending = 0U;
     manual_uart_owned = 0U;
     if (primask == 0U) __enable_irq();
+
     if (manual_control.owns_motors) manual_recenter();
     Manual_Init(&manual_control);
     manual_driving = 0U;
     manual_telemetry_kind = 0;
+    manual_throttle_percent = 0;
+    manual_motion_direction = 0;
+    manual_motion_kind = MANUAL_MOTION_STOP;
     manual_reply_pending[0] = '\0';
     seg_rebase = 1U;
 }
@@ -807,6 +840,7 @@ static void manual_begin_mode(uint32_t session, uint32_t now)
     motor_brake();
     if (is_turn_command(previous_command)) center_servo_after_turn(previous_command);
     else manual_recenter();
+
     cmdq_clear();
     stop_turn_controller();
     obstacle_stop_mode = OBST_MODE_NONE;
@@ -822,38 +856,112 @@ static void manual_begin_mode(uint32_t session, uint32_t now)
     odom_counts_run_ir = 0;
     odom_cm_run_ir = 0.0f;
     seg_rebase = 1U;
+
     Manual_Begin(&manual_control, session, now);
     manual_uart_owned = 1U;
     manual_driving = 0U;
     manual_telemetry_kind = 0;
+    manual_throttle_percent = 0;
+    manual_motion_direction = 0;
+    manual_motion_kind = MANUAL_MOTION_STOP;
     uart_cmd = CMD_MANUAL;
 }
 
-static void manual_apply_output(ManualSetpoint output)
+/* Return 0 when the normal CMD_FORWARD/CMD_REVERSE controller should run.
+ * Return 1 when manual mode has already produced/braked the outputs this tick.
+ */
+static int manual_apply_output(ManualSetpoint output)
 {
-    if (output.steering == 0) {
-        manual_recenter();
-    } else {
-        const int reverse = manual_control.requested.direction < 0;
-        const int end_ccr = output.steering > 0
-            ? (reverse ? SERVO_REVERSE_RIGHT_CCR : SERVO_RIGHT_CCR)
-            : (reverse ? SERVO_REVERSE_LEFT_CCR : SERVO_LEFT_CCR);
-        const int magnitude = abs(output.steering);
-        const int servo = (int)current_center_ccr +
-                         (end_ccr - (int)current_center_ccr) * magnitude / 100;
-        htim12.Instance->CCR2 = (uint32_t)servo;
-        manual_last_steer = output.steering;
+    manual_driving = (output.direction != 0 && output.throttle_percent > 0) ? 1U : 0U;
+
+    if (!manual_driving)
+    {
+        if (manual_motion_kind != MANUAL_MOTION_STOP)
+        {
+            motor_brake();
+            manual_recenter();
+            seg_rebase = 1U;
+        }
+
+        manual_motion_kind = MANUAL_MOTION_STOP;
+        manual_motion_direction = 0;
+        manual_throttle_percent = 0;
+        straight_left_pwm = PWM_MAX;
+        straight_right_pwm = PWM_MAX;
+        straight_servo_ccr = current_center_ccr;
+        uart_cmd = CMD_MANUAL;
+        return 1;
     }
-    manual_driving = (output.direction != 0) ? 1U : 0U;
-    if (output.direction > 0) {
-        left_forward_duty(pwm_compare_from_effort((float)output.left_effort));
-        right_forward_duty(pwm_compare_from_effort((float)output.right_effort));
-    } else if (output.direction < 0) {
-        left_reverse_duty(pwm_compare_from_effort((float)output.left_effort));
-        right_reverse_duty(pwm_compare_from_effort((float)output.right_effort));
-    } else {
+
+    manual_throttle_percent = output.throttle_percent;
+
+    /* Straight manual movement uses the exact same straight controller as F/R:
+     * feed-forward scaling, encoder PI and gyro/servo heading hold. */
+    if (output.steering == 0)
+    {
+        if (manual_motion_kind != MANUAL_MOTION_STRAIGHT ||
+            manual_motion_direction != output.direction)
+        {
+            motor_brake();
+            manual_recenter();
+            target_angle = total_angle;
+            obstacle_stop_mode = OBST_MODE_NONE;
+            target_counts = (output.direction > 0) ? INT32_MAX : (INT32_MIN + 1);
+            seg_rebase = 1U;
+        }
+
+        manual_motion_kind = MANUAL_MOTION_STRAIGHT;
+        manual_motion_direction = output.direction;
+        uart_cmd = (output.direction > 0) ? CMD_FORWARD : CMD_REVERSE;
+        return 0;
+    }
+
+    /* Continuous manual arc. Full D-pad/trigger steering uses the same full
+     * servo CCR, TURN_OUTER_EFFORT_MAX and inner-wheel ratio as FR/FL/RR/RL.
+     * Partial stick steering interpolates those STM32-owned values. */
+    const int reverse = (output.direction < 0);
+    const int right = (output.steering > 0);
+    const int magnitude = abs(output.steering);
+    const int command = !reverse
+        ? (right ? CMD_ARC_RIGHT : CMD_ARC_LEFT)
+        : (right ? CMD_ARC_RIGHT_REV : CMD_ARC_LEFT_REV);
+
+    if (manual_motion_kind != MANUAL_MOTION_TURN ||
+        manual_motion_direction != output.direction ||
+        ((manual_last_steer > 0) != right))
+    {
         motor_brake();
+        seg_rebase = 1U;
     }
+
+    const int end_ccr = right
+        ? (reverse ? SERVO_REVERSE_RIGHT_CCR : SERVO_RIGHT_CCR)
+        : (reverse ? SERVO_REVERSE_LEFT_CCR : SERVO_LEFT_CCR);
+    const int servo = (int)current_center_ccr +
+                      (end_ccr - (int)current_center_ccr) * magnitude / 100;
+    htim12.Instance->CCR2 = (uint32_t)servo;
+    manual_last_steer = output.steering;
+
+    float effort = TURN_OUTER_EFFORT_MAX * ((float)output.throttle_percent / 100.0f);
+    if (effort < TURN_OUTER_EFFORT_MIN) effort = TURN_OUTER_EFFORT_MIN;
+    if (effort > TURN_OUTER_EFFORT_MAX) effort = TURN_OUTER_EFFORT_MAX;
+
+    const float full_inner_ratio = right
+        ? TURN_INNER_EFFORT_RATIO_R
+        : TURN_INNER_EFFORT_RATIO_L;
+    const float inner_ratio = 1.0f -
+        (1.0f - full_inner_ratio) * ((float)magnitude / 100.0f);
+
+    const int outer_pwm = pwm_compare_from_effort(effort);
+    const int inner_pwm = pwm_compare_from_effort(effort * inner_ratio);
+
+    turn_effort_cmd = effort;
+    drive_turn_wheels(command, outer_pwm, inner_pwm);
+
+    manual_motion_kind = MANUAL_MOTION_TURN;
+    manual_motion_direction = output.direction;
+    uart_cmd = CMD_MANUAL;
+    return 1;
 }
 
 static int manual_service(void)
@@ -863,6 +971,7 @@ static int manual_service(void)
     uint8_t have_line = 0U;
     const uint32_t now = HAL_GetTick();
     const uint32_t primask = __get_PRIMASK();
+
     __disable_irq();
     if (manual_line_pending) {
         for (size_t i = 0; i < sizeof(line); ++i) line[i] = manual_rx_line[i];
@@ -876,6 +985,7 @@ static int manual_service(void)
                        (unsigned long)manual_control.session);
         manual_queue_reply(reply);
     }
+
     if (have_line) {
         ManualMessage message;
         if (Manual_ParseLine(line, &message)) {
@@ -892,8 +1002,8 @@ static int manual_service(void)
             }
         }
     }
+
     if (!manual_control.owns_motors) {
-        /* Do not overwrite a BEGIN ownership flag set by a newer interrupt. */
         const uint32_t saved = __get_PRIMASK();
         __disable_irq();
         if (!manual_line_pending) manual_uart_owned = 0U;
@@ -902,23 +1012,22 @@ static int manual_service(void)
         return 0;
     }
 
-    /* No target angle, terminal yaw PID, automatic post-turn travel, or queue. */
-    const ManualSetpoint request = manual_control.requested;
-    const int steer_sign = (request.steering > 0) - (request.steering < 0);
-    const int kind = request.direction == 0 ? 0 :
-                     (request.direction > 0 ? 1 : 4) + (steer_sign + 1);
+    const ManualSetpoint output = Manual_Output(&manual_control, now);
+    const int steer_sign = (output.steering > 0) - (output.steering < 0);
+    const int kind = output.direction == 0 ? 0 :
+                     (output.direction > 0 ? 1 : 4) + (steer_sign + 1);
+
     if (kind != 0 && kind != manual_telemetry_kind) {
-        const char *name = request.direction > 0
+        const char *name = output.direction > 0
             ? (steer_sign < 0 ? "MAN_FL" : (steer_sign > 0 ? "MAN_FR" : "MAN_FWD"))
             : (steer_sign < 0 ? "MAN_RL" : (steer_sign > 0 ? "MAN_RR" : "MAN_REV"));
-        const int effort = request.left_effort > request.right_effort
-                         ? request.left_effort : request.right_effort;
-        Telemetry_StartCommand(name, effort);
+        Telemetry_StartCommand(name, output.throttle_percent);
     }
     manual_telemetry_kind = kind;
-    manual_apply_output(Manual_Output(&manual_control, now));
+
+    const int handled = manual_apply_output(output);
     manual_flush_reply();
-    return 1;
+    return handled;
 }
 /* ---------------- luther End hold-to-drive manual mode ---------------- */
 
@@ -2642,13 +2751,39 @@ void motorTask(void const * argument)
       static float cpsA_f = 0.0f;
       static float cpsB_f = 0.0f;
 
-      // ====== Distance stop using average counts ======
+      /* 32-bit segment distance accumulator. The hardware encoder counters are
+       * only 16-bit, so subtracting the command-start counter directly fails
+       * once a move exceeds about 32767 encoder counts (roughly 4.4 m here).
+       * Small wrap-safe deltas are accumulated into int32_t instead. */
+      static uint16_t dist_last_a = 0U;
+      static uint16_t dist_last_b = 0U;
+      static int32_t dist_accum_a = 0;
+      static int32_t dist_accum_b = 0;
+      static int dist_direction = 0;
+      static uint8_t dist_initialized = 0U;
+
       uint16_t now_a = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
       uint16_t now_b = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
+      const int commanded_direction = (uart_cmd == CMD_REVERSE) ? -1 : 1;
 
-      int32_t moved_a = (int16_t)(now_a - enc_start_a);
-      int32_t moved_b = -(int16_t)(now_b - enc_start_b); // right reversed
-      int32_t avg_moved = (moved_a + moved_b) / 2;
+      if (!dist_initialized || seg_rebase || dist_direction != commanded_direction)
+      {
+        dist_last_a = now_a;
+        dist_last_b = now_b;
+        dist_accum_a = 0;
+        dist_accum_b = 0;
+        dist_direction = commanded_direction;
+        dist_initialized = 1U;
+      }
+      else
+      {
+        dist_accum_a += (int16_t)(now_a - dist_last_a);
+        dist_accum_b += -(int16_t)(now_b - dist_last_b);
+        dist_last_a = now_a;
+        dist_last_b = now_b;
+      }
+
+      int32_t avg_moved = (dist_accum_a + dist_accum_b) / 2;
 
       // ====== Stop conditions ======
       bool done_by_counts = false;
@@ -2898,31 +3033,37 @@ void motorTask(void const * argument)
       int off = (int)off_f;
       //int off = 0;
 
-      // luther speed
-      int base = PWM_RUN;
-
       /*
-       * Select a separate feed-forward calibration depending on direction.
-       * This is evaluated here because an obstacle command may have changed
-       * CMD_FORWARD into CMD_REVERSE earlier in this same loop iteration.
+       * Select the same calibrated full-speed compare used by scripted F/R.
+       * In manual straight mode, throttle only interpolates from brake/zero
+       * drive (PWM_MAX) to that already-calibrated full-speed point. At 100%
+       * the values are exactly the same as a normal scripted F/R command.
        */
       const bool is_reverse = (uart_cmd == CMD_REVERSE);
+      const int throttle_percent =
+          (manual_control.owns_motors && manual_motion_kind == MANUAL_MOTION_STRAIGHT)
+              ? manual_throttle_percent
+              : 100;
 
       const float left_compare_scale =
-          is_reverse
-              ? REV_LEFT_COMPARE_SCALE
-              : FWD_LEFT_COMPARE_SCALE;
-
+          is_reverse ? REV_LEFT_COMPARE_SCALE : FWD_LEFT_COMPARE_SCALE;
       const float right_compare_scale =
-          is_reverse
-              ? REV_RIGHT_COMPARE_SCALE
-              : FWD_RIGHT_COMPARE_SCALE;
+          is_reverse ? REV_RIGHT_COMPARE_SCALE : FWD_RIGHT_COMPARE_SCALE;
 
-      int base_L =
-          (int)((float)base * left_compare_scale + 0.5f);
+      const int full_base_L = clamp_pwm_compare(
+          (int)((float)PWM_RUN * left_compare_scale + 0.5f));
+      const int full_base_R = clamp_pwm_compare(
+          (int)((float)PWM_RUN * right_compare_scale + 0.5f));
 
-      int base_R =
-          (int)((float)base * right_compare_scale + 0.5f);
+      int base_L = PWM_MAX -
+          ((PWM_MAX - full_base_L) * throttle_percent) / 100;
+      int base_R = PWM_MAX -
+          ((PWM_MAX - full_base_R) * throttle_percent) / 100;
+
+      /* Keep PI correction proportional to requested manual drive at partial
+       * stick throttle. Scripted commands remain unchanged at 100%. */
+      if (manual_control.owns_motors && throttle_percent < 100)
+          off = (off * throttle_percent) / 100;
 
       int lDuty;
       int rDuty;
@@ -2949,84 +3090,136 @@ void motorTask(void const * argument)
       lDuty = clamp_pwm_compare(lDuty);
       rDuty = clamp_pwm_compare(rDuty);
 
+      /* Save actual straight motor controller outputs for telemetry. */
+      straight_left_pwm = lDuty;
+      straight_right_pwm = rDuty;
+
       // Hold the heading captured at the start of THIS straight segment.
       error_angle = target_angle - total_angle;
 
-      // Tune K_SERVO if needed.
-      // Make steering a bit gentler and ignore tiny gyro noise
+      /* =========================================================
+       * Straight-line gyro heading correction
+       * ========================================================= */
 
-      // adding servo deadband here
-
-      const float K_SERVO = 1.5f; // was 3.5f; lower = less twitchy
-
-      // Deadband: ignore tiny heading error (< 0.3°) to prevent servo hunting
-      //			if (error_angle > -0.1f && error_angle < 0.1f) {
-      //				error_angle = 0.0;
-      //			}
-
-      //int corr = (int)(K_SERVO * error_angle);
-      /// added servo deadband here
-
-      // luther turning
       float steering_error = error_angle;
 
-      /* Prevent correction from reacting to tiny gyro noise. */
-      if (fabsf(steering_error) < 0.3f)
+      /* Ignore tiny gyro noise. */
+      if (fabsf(steering_error) < STRAIGHT_STEER_DEADBAND_DEG)
       {
           steering_error = 0.0f;
       }
 
-      float corr_f = K_SERVO * steering_error;
+      /*
+       * First calculate controller output as a percentage of
+       * available steering travel rather than raw CCR counts.
+       */
+      float correction_percent =
+          STRAIGHT_STEER_KP_PERCENT_PER_DEG * steering_error;
 
-      int corr = (corr_f >= 0.0f)
-                   ? (int)(corr_f + 0.5f)
-                   : (int)(corr_f - 0.5f);
-
-      /* Start from the centre established by the previous turn. */
-      int servo = (int)current_center_ccr;
-
-      /*if (uart_cmd == CMD_FORWARD)
+      /*
+       * Once outside the deadband, make sure the servo moves enough
+       * to overcome linkage/servo dead travel.
+       */
+      if (steering_error != 0.0f &&
+          fabsf(correction_percent) < STRAIGHT_STEER_MIN_PERCENT)
       {
-        if (error_angle > 0)
-        {
-          servo = SERVO_CENTER_AFTERRIGHT_CCR;
-        }
-
-        else if (error_angle < 0)
-        {
-          servo = SERVO_CENTER_AFTERLEFT_CCR; //160
-        }
+          correction_percent =
+              (correction_percent > 0.0f)
+                  ? STRAIGHT_STEER_MIN_PERCENT
+                  : -STRAIGHT_STEER_MIN_PERCENT;
       }
-      else if (uart_cmd == CMD_REVERSE)
-      {
-        if (error_angle < 0)
-        {
-          servo = SERVO_CENTER_AFTERRIGHT_CCR;
-        }
 
-        else if (error_angle > 0)
-        {
-          servo = SERVO_CENTER_AFTERLEFT_CCR;
-        }
-      }*/
+      /* Limit heading correction. */
+      if (correction_percent > STRAIGHT_STEER_MAX_PERCENT)
+      {
+          correction_percent = STRAIGHT_STEER_MAX_PERCENT;
+      }
+      else if (correction_percent < -STRAIGHT_STEER_MAX_PERCENT)
+      {
+          correction_percent = -STRAIGHT_STEER_MAX_PERCENT;
+      }
+
+      /*
+       * Convert yaw correction into physical steering direction.
+       *
+       * Positive physical_steer_percent = RIGHT
+       * Negative physical_steer_percent = LEFT
+       *
+       * Reverse requires the steering correction direction to flip.
+       */
+      float physical_steer_percent;
 
       if (uart_cmd == CMD_FORWARD)
       {
-        servo = servo - corr; // left is smaller CCR for your servo map
+          physical_steer_percent = -correction_percent;
       }
       else
-      {                       // CMD_REVERSE
-        servo = servo + corr; // flip sense in reverse
+      {
+          physical_steer_percent = correction_percent;
       }
 
-      // clamp to safe range
-      if (servo < SERVO_LEFT_CCR)
-        servo = SERVO_LEFT_CCR;
-      if (servo > SERVO_RIGHT_CCR)
-        servo = SERVO_RIGHT_CCR;
+      /* Use the current calibrated centre. */
+      int center = (int)current_center_ccr;
 
-      straight_left_pwm = lDuty;
-      straight_right_pwm = rDuty;
+      /*
+       * Use the appropriate steering endpoints for the direction
+       * of travel.
+       */
+      int left_limit;
+      int right_limit;
+
+      if (uart_cmd == CMD_REVERSE)
+      {
+          left_limit = SERVO_REVERSE_LEFT_CCR;
+          right_limit = SERVO_REVERSE_RIGHT_CCR;
+      }
+      else
+      {
+          left_limit = SERVO_LEFT_CCR;
+          right_limit = SERVO_RIGHT_CCR;
+      }
+
+      int servo = center;
+
+      if (physical_steer_percent > 0.0f)
+      {
+          /* RIGHT steering */
+          float available = (float)(right_limit - center);
+
+          servo = center +
+              (int)lroundf(
+                  available *
+                  physical_steer_percent /
+                  100.0f
+              );
+      }
+      else if (physical_steer_percent < 0.0f)
+      {
+          /* LEFT steering */
+          float available = (float)(center - left_limit);
+
+          servo = center +
+              (int)lroundf(
+                  available *
+                  physical_steer_percent /
+                  100.0f
+              );
+      }
+
+      /* Final mechanical safety clamp. */
+      if (servo < left_limit)
+      {
+          servo = left_limit;
+      }
+
+      if (servo > right_limit)
+      {
+          servo = right_limit;
+      }
+
+      /* Save controller state for telemetry. */
+      straight_servo_center_ccr = center;
+      straight_steer_percent = physical_steer_percent;
       straight_servo_ccr = servo;
 
       // add sliding right
@@ -3400,8 +3593,10 @@ void encoderTask(void const * argument)
 				Telemetry_SendEncoder(
 				    (int16_t)delta_a,
 				    (int16_t)delta_b,
-					sample_dt_ms,
-					(uart_cmd == CMD_MANUAL) ? manual_driving : ((uart_cmd != CMD_NONE) ? 1U : 0U)
+				    manual_control.owns_motors
+				        ? manual_driving
+				        : ((uart_cmd != CMD_NONE) ? 1U : 0U),
+				    sample_dt_ms
 				);
 
 				Telemetry_SendTurn(
@@ -3422,9 +3617,12 @@ void encoderTask(void const * argument)
 				    gyro_yaw_rate_dps,
 				    error_angle,
 				    straight_servo_ccr,
+				    straight_servo_center_ccr,
+				    straight_steer_percent,
 				    straight_left_pwm,
 				    straight_right_pwm,
-				    (uart_cmd == CMD_FORWARD || uart_cmd == CMD_REVERSE) ? 1U : 0U
+				    (uart_cmd == CMD_FORWARD ||
+				     uart_cmd == CMD_REVERSE) ? 1U : 0U
 				);
 			  }
 //    if ((HAL_GetTick() - last_tick) >= 1000U) // 1 s window

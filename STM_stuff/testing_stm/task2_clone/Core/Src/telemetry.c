@@ -261,6 +261,8 @@ void Telemetry_SendStraight(
     float yaw_rate_dps,
     float error_deg,
     int servo_ccr,
+    int servo_center_ccr,
+    float steer_percent,
     int left_pwm,
     int right_pwm,
     uint8_t straight_active
@@ -287,7 +289,7 @@ void Telemetry_SendStraight(
     length = snprintf(
         buffer,
         sizeof(buffer),
-        "STR,%lu,%lu,%ld,%ld,%ld,%ld,%d,%d,%d\r\n",
+        "STR,%lu,%lu,%ld,%ld,%ld,%ld,%d,%d,%ld,%d,%d\r\n",
         (unsigned long)HAL_GetTick(),
         (unsigned long)command_id,
         (long)scale_by_1000(yaw_deg),
@@ -295,6 +297,8 @@ void Telemetry_SendStraight(
         (long)scale_by_1000(yaw_rate_dps),
         (long)scale_by_1000(error_deg),
         servo_ccr,
+        servo_center_ccr,
+        (long)scale_by_1000(steer_percent),
         left_pwm,
         right_pwm
     );

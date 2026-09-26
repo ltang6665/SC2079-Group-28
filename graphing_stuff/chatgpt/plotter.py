@@ -45,6 +45,9 @@ def new_run() -> dict[str, object]:
         "straight_rate": [],
         "straight_error": [],
         "servo_ccr": [],
+        "servo_center_ccr": [],
+        "servo_offset_ccr": [],
+        "steer_cmd_percent": [],
         "straight_left_pwm": [],
         "straight_right_pwm": [],
         "faults": [],
@@ -209,6 +212,21 @@ def load_log(
                     run["straight_rate"].append(as_float(row, "yaw_rate_dps"))
                     run["straight_error"].append(as_float(row, "turn_error_deg"))
                     run["servo_ccr"].append(as_int(row, "servo_ccr"))
+                    center_text = row.get("servo_center_ccr", "").strip()
+                    offset_text = row.get("servo_offset_ccr", "").strip()
+                    percent_text = row.get("steer_cmd_percent", "").strip()
+
+                    run["servo_center_ccr"].append(
+                        float(center_text) if center_text else math.nan
+                    )
+
+                    run["servo_offset_ccr"].append(
+                        float(offset_text) if offset_text else math.nan
+                    )
+
+                    run["steer_cmd_percent"].append(
+                        float(percent_text) if percent_text else math.nan
+                    )
                     run["straight_left_pwm"].append(as_int(row, "left_pwm"))
                     run["straight_right_pwm"].append(as_int(row, "right_pwm"))
                 except (KeyError, TypeError, ValueError):
@@ -221,6 +239,9 @@ def load_log(
                             "straight_rate",
                             "straight_error",
                             "servo_ccr",
+                            "servo_center_ccr",
+                            "servo_offset_ccr",
+                            "steer_cmd_percent", 
                             "straight_left_pwm",
                             "straight_right_pwm",
                         )
@@ -233,6 +254,9 @@ def load_log(
                         "straight_rate",
                         "straight_error",
                         "servo_ccr",
+                        "servo_center_ccr",
+                        "servo_offset_ccr",
+                        "steer_cmd_percent", 
                         "straight_left_pwm",
                         "straight_right_pwm",
                     ):
@@ -358,8 +382,8 @@ def plot_run(
         fig, axes = plt.subplots(4, 1, figsize=(11, 13), sharex=True)
         ax_speed, ax_heading, ax_error, ax_output = axes
     elif has_straight:
-        fig, axes = plt.subplots(3, 1, figsize=(11, 10), sharex=True)
-        ax_speed, ax_heading, ax_output = axes
+        fig, axes = plt.subplots(4, 1, figsize=(11, 13), sharex=True)
+        ax_speed, ax_heading, ax_steering, ax_output = axes
     else:
         fig, axes = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
         ax_speed, ax_accel = axes
@@ -444,7 +468,6 @@ def plot_run(
         ax_heading.legend()
         ax_heading.grid(True)
 
-        ax_output.plot(straight_relative, run["servo_ccr"], label="Servo CCR")
         ax_output.plot(
             straight_relative,
             run["straight_left_pwm"],
@@ -457,11 +480,55 @@ def plot_run(
             label="Right PWM compare",
             alpha=0.8,
         )
-        ax_output.set_title("Straight Controller Outputs")
-        ax_output.set_ylabel("CCR / PWM compare")
+        ax_output.set_title("Straight Motor Output (higher compare = less drive)")
+        ax_output.set_ylabel("PWM compare")
         ax_output.set_xlabel("Time since command start (s)")
         ax_output.legend()
         ax_output.grid(True)
+
+        # ----- Steering controller -----
+
+        ax_steering.plot(
+            straight_relative,
+            run["servo_ccr"],
+            label="Actual servo CCR"
+        )
+
+        if any(math.isfinite(v) for v in run["servo_center_ccr"]):
+            ax_steering.plot(
+                straight_relative,
+                run["servo_center_ccr"],
+                label="Servo centre CCR",
+                linestyle="--"
+            )
+
+        ax_steering.set_title(
+            "Straight Steering Correction "
+            "(higher CCR = right, lower CCR = left)"
+        )
+
+        ax_steering.set_ylabel("Servo CCR")
+        ax_steering.grid(True)
+
+        ax_steer_percent = ax_steering.twinx()
+
+        if any(math.isfinite(v) for v in run["steer_cmd_percent"]):
+            ax_steer_percent.plot(
+                straight_relative,
+                run["steer_cmd_percent"],
+                label="Steering command"
+            )
+
+        ax_steer_percent.set_ylabel("Steering command (%)")
+
+        lines1, labels1 = ax_steering.get_legend_handles_labels()
+        lines2, labels2 = ax_steer_percent.get_legend_handles_labels()
+
+        ax_steering.legend(
+            lines1 + lines2,
+            labels1 + labels2,
+            loc="best"
+        )
 
     else:
         a_accel = [0.0]
