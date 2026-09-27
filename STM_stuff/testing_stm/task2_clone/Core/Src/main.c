@@ -223,7 +223,7 @@ volatile int32_t target_counts = 0; // +ve forward, -ve reverse
 #define COUNTS_PER_CM ((float)ENC_CPR / WHEEL_CIRC_CM)
 
 #define PWM_MAX 7199
-#define PWM_RUN 3800 // your current "run" duty // used to be 4500, 4000
+#define PWM_RUN 3800 // your current "run" duty // used to be 4500, 4000, 3800
 #define PWM_MIN 6800
 #define PWM_INNER 6000
 
@@ -314,17 +314,25 @@ volatile turn_t cmd_turn = TURN_NONE;
 // luther CCR
 #define SERVO_CENTER_CCR 152            // straight (you already use ~152) /155
 #define SERVO_CENTER_AFTERLEFT_CCR 164  // latest value supplied by user
-#define SERVO_CENTER_AFTERRIGHT_CCR 151 // latest value supplied by user
+#define SERVO_CENTER_AFTERRIGHT_CCR 150 // latest value supplied by user
 #define SERVO_RIGHT_CCR 240             // <-- set to your "forward-right" CCR 250
 #define SERVO_LEFT_CCR 110              // <-- set to your "forward-left"  CCR 107
 #define SERVO_REVERSE_LEFT_CCR 110      // 112
 #define SERVO_REVERSE_RIGHT_CCR 240
 
+#define TURN_SERVO_ONLY_TEST       0 // for testing
+#define TURN_SERVO_TEST_HOLD_MS    10000U //how long to hold the turn for
+
 #define SPEED_LPF_TAU 0.05f // ~0.2 s LPF for encoder speed
+
+#define SERVO_HOME_RIGHT_CCR              SERVO_RIGHT_CCR // direction to lock before straightening
+#define STEERING_HOME_BRAKE_SETTLE_MS     50U // allows brake state to establish before steering moves
+#define STEERING_HOME_RIGHT_HOLD_MS       600U //Time to hold the steering on the right
+#define STEERING_HOME_CENTER_SETTLE_MS    500U //Time to allow the steering/linkage to settle
 
 /* Straight-line heading hold. These values act on the steering servo only;
  * wheel-speed PI remains responsible for balancing encoder speeds. */
-#define STRAIGHT_STEER_KP_PERCENT_PER_DEG  5.0f
+#define STRAIGHT_STEER_KP_PERCENT_PER_DEG  10.0f
 #define STRAIGHT_STEER_DEADBAND_DEG        0.10f
 #define STRAIGHT_STEER_MIN_PERCENT         5.0f
 #define STRAIGHT_STEER_MAX_PERCENT        70.0f
@@ -362,14 +370,8 @@ volatile int straight_left_pwm = PWM_MAX;
 volatile int straight_right_pwm = PWM_MAX;
 volatile int straight_servo_ccr = SERVO_CENTER_CCR;
 volatile int straight_servo_center_ccr = SERVO_CENTER_CCR;
-
-/*
- * Actual physical steering request:
- *   negative = left
- *   positive = right
- *   units = percent of available servo travel
- */
-volatile float straight_steer_percent = 0.0f;
+static volatile uint8_t steering_homed = 0U;
+volatile float straight_steer_percent = 0.0f; // Actual physical steering request: negative = left, positive = right,  units = percent of available servo travel
 
 static float turn_i_error_deg_s = 0.0f;
 static uint32_t turn_pid_last_tick = 0U;
@@ -601,6 +603,27 @@ static inline void set_servo_center_afterright(void)
 {
     current_center_ccr = SERVO_CENTER_AFTERRIGHT_CCR;
     htim12.Instance->CCR2 = current_center_ccr;
+}
+
+// luther startup steering homing
+static void home_steering_from_right(void)
+{
+    steering_homed = 0U;
+
+    set_servo_right(); // fully lock to a know position, in this case right
+
+    osDelay(STEERING_HOME_RIGHT_HOLD_MS);
+
+    set_servo_center_afterright(); // straighten out from known ccr position with known ccr value
+
+    osDelay(STEERING_HOME_CENTER_SETTLE_MS);// delay before gyro calibration
+
+    //Keep straight-controller telemetry consistent with the newly established centre.
+    straight_servo_center_ccr = current_center_ccr;
+    straight_servo_ccr = current_center_ccr;
+    straight_steer_percent = 0.0f;
+
+    steering_homed = 1U; // gyro can now calibrate
 }
 
 static inline int clamp_pwm_compare(int value)
@@ -1250,264 +1273,299 @@ static const char *telemetry_name_for_cmd(script_cmd_t type)
 // pop from queue and set all the variables needed, then change the uart_cmd
 static int start_next_from_queue(void)
 {
-  script_item_t it;
-  if (!cmdq_pop(&it))
-    return 0;
+	if (!steering_homed || !gyro_healthy){return 0;} //disable commands before steering sequence is finalized
 
-  const char *telemetry_name = telemetry_name_for_cmd(it.type);
+	script_item_t it;
+	if (!cmdq_pop(&it))
+		return 0;
 
-  if (telemetry_name != NULL)
-  {
-      Telemetry_StartCommand(telemetry_name, it.value);
-  }
+	const char *telemetry_name = telemetry_name_for_cmd(it.type);
 
-  switch (it.type)
-  {
+	if (telemetry_name != NULL)
+	{
+		Telemetry_StartCommand(telemetry_name, it.value);
+	}
 
-  case SCMD_FX: // fall through — same setup, just different reverse flag
-  case SCMD_FU:
-  {
-    // Forward "forever" but stop when ultrasound <= us_stop_cm
-    enc_start_a = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
-    enc_start_b = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
-    target_angle = total_angle;
-    set_servo_center();
+	switch (it.type)
+	{
 
-    // reset odometry for reporting
-    odom_counts_run = 0;
-    odom_cm_run = 0.0f;
+		case SCMD_FX: // fall through — same setup, just different reverse flag
+		case SCMD_FU:
+		{
+			// Forward "forever" but stop when ultrasound <= us_stop_cm
+			enc_start_a = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
+			enc_start_b = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
+			target_angle = total_angle;
+			set_servo_center();
 
-    target_counts = INT32_MAX;                                           // run "forever"
-    us_stop_cm = (it.value > 0) ? (uint16_t)it.value : OBSTACLE_STOP_CM; // per-move threshold
-    us_allow_reverse = (it.type == SCMD_FU) ? 1 : 0;                     // FU=reverse, FX=just stop
-    obstacle_stop_mode = OBST_MODE_US_T;                                 // our new mode
-    uart_cmd = CMD_FORWARD;
-    seg_rebase = 1; // clean speed/odom baselines
-    return 1;
-  }
+			// reset odometry for reporting
+			odom_counts_run = 0;
+			odom_cm_run = 0.0f;
 
-  case SCMD_FIRO:
-  {
-    enc_start_a = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
-    enc_start_b = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
-    target_angle = total_angle;
-    set_servo_center();
+			target_counts = INT32_MAX;                                           // run "forever"
+			us_stop_cm = (it.value > 0) ? (uint16_t)it.value : OBSTACLE_STOP_CM; // per-move threshold
+			us_allow_reverse = (it.type == SCMD_FU) ? 1 : 0;                     // FU=reverse, FX=just stop
+			obstacle_stop_mode = OBST_MODE_US_T;                                 // our new mode
+			uart_cmd = CMD_FORWARD;
+			seg_rebase = 1; // clean speed/odom baselines
+			return 1;
+		}
 
-    odom_counts_run = 0;
-    odom_cm_run = 0.0f;
+		case SCMD_FIRO:
+		{
+			enc_start_a = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
+			enc_start_b = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
+			target_angle = total_angle;
+			set_servo_center();
 
-    target_counts = INT32_MAX; // run “forever”
-    obstacle_stop_mode = OBST_MODE_IR_RIGHT_O;
-    uart_cmd = CMD_FORWARD;
-    seg_rebase = 1; // <--- rebase on entry
-    return 1;
-  }
+			odom_counts_run = 0;
+			odom_cm_run = 0.0f;
 
-  case SCMD_FILO:
-  {
-    enc_start_a = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
-    enc_start_b = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
-    target_angle = total_angle;
-    set_servo_center();
+			target_counts = INT32_MAX; // run “forever”
+			obstacle_stop_mode = OBST_MODE_IR_RIGHT_O;
+			uart_cmd = CMD_FORWARD;
+			seg_rebase = 1; // <--- rebase on entry
+			return 1;
+		}
 
-    odom_counts_run = 0;
-    odom_cm_run = 0.0f;
+		case SCMD_FILO:
+		{
+			enc_start_a = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
+			enc_start_b = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
+			target_angle = total_angle;
+			set_servo_center();
 
-    target_counts = INT32_MAX;                // run “forever”
-    obstacle_stop_mode = OBST_MODE_IR_LEFT_O; // NEW mode
-    uart_cmd = CMD_FORWARD;
-    seg_rebase = 1; // <--- rebase on entry
-    return 1;
-  }
+			odom_counts_run = 0;
+			odom_cm_run = 0.0f;
 
-  case SCMD_FIR:
-  {
-    // forward "forever" until right IR reports 0 (no obstacle)
-    enc_start_a = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
-    enc_start_b = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
-    target_angle = total_angle;
-    set_servo_center();
+			target_counts = INT32_MAX;                // run “forever”
+			obstacle_stop_mode = OBST_MODE_IR_LEFT_O; // NEW mode
+			uart_cmd = CMD_FORWARD;
+			seg_rebase = 1; // <--- rebase on entry
+			return 1;
+		}
 
-    odom_counts_run_ir = 0;
-    odom_cm_run_ir = 0.0f;
+		case SCMD_FIR:
+		{
+			// forward "forever" until right IR reports 0 (no obstacle)
+			enc_start_a = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
+			enc_start_b = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
+			target_angle = total_angle;
+			set_servo_center();
 
-    target_counts = INT32_MAX;               // sentinel: distance won't stop us
-    obstacle_stop_mode = OBST_MODE_IR_RIGHT; // NEW mode
-    uart_cmd = CMD_FORWARD;
-    seg_rebase = 1; // <--- rebase on entry
-    return 1;
-  }
-  case SCMD_FIL:
-  {
-    // forward "forever" until right IR reports 0 (no obstacle)
-    enc_start_a = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
-    enc_start_b = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
-    target_angle = total_angle;
-    set_servo_center();
+			odom_counts_run_ir = 0;
+			odom_cm_run_ir = 0.0f;
 
-    odom_counts_run_ir = 0;
-    odom_cm_run_ir = 0.0f;
+			target_counts = INT32_MAX;               // sentinel: distance won't stop us
+			obstacle_stop_mode = OBST_MODE_IR_RIGHT; // NEW mode
+			uart_cmd = CMD_FORWARD;
+			seg_rebase = 1; // <--- rebase on entry
+			return 1;
+		}
 
-    target_counts = INT32_MAX;              // sentinel: distance won't stop us
-    obstacle_stop_mode = OBST_MODE_IR_LEFT; // IR LEFT
-    uart_cmd = CMD_FORWARD;
-    seg_rebase = 1; // <--- rebase on entry
-    return 1;
-  }
-  case SCMD_FWD_CM:
-  {
-    int cm = it.value;
-    enc_start_a = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
-    enc_start_b = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
-    target_angle = total_angle;
-    set_servo_center();
+		case SCMD_FIL:
+		{
+			// forward "forever" until right IR reports 0 (no obstacle)
+			enc_start_a = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
+			enc_start_b = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
+			target_angle = total_angle;
+			set_servo_center();
 
-    if (cm > 0)
-    {
-      // normal distance move
-      int32_t tgt = (int32_t)(cm * COUNTS_PER_CM + 0.5f);
-      target_counts = tgt;
-      obstacle_stop_mode = OBST_MODE_NONE; // ensure off
-      uart_cmd = CMD_FORWARD;
-    }
-    else
-    {
-      // use ultrasound just go forward forever
-      obstacle_stop_mode = OBST_MODE_US;
-      target_counts = INT32_MAX; // sentinel; we won't use it
-      odom_counts_run = 0;       // reset US segment odometer
-      odom_cm_run = 0.0f;
-      uart_cmd = CMD_FORWARD;
-    }
-    seg_rebase = 1; // <--- rebase on entry
-    return 1;
-  }
-  case SCMD_REV_CM:
-  {
-    int cm = (it.value > 0) ? it.value : 50;
-    enc_start_a = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
-    enc_start_b = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
-    int32_t tgt = -(int32_t)(cm * COUNTS_PER_CM + 0.5f);
-    target_counts = tgt;
-    target_angle = total_angle;
-    set_servo_center();
-    uart_cmd = CMD_REVERSE;
-    seg_rebase = 1;
-    return 1;
-  }
+			odom_counts_run_ir = 0;
+			odom_cm_run_ir = 0.0f;
 
-  case SCMD_ARC_FR:
-    TURN_DEG = (it.value >= 0) ? (float)it.value : -(float)it.value;
-    arc_target_angle = total_angle - TURN_DEG;
-    set_servo_right();
-    turn_motor_enable_tick = HAL_GetTick() + TURN_DELAY_RIGHT;
-    arc_postforward_cm = 0;
-    uart_cmd = CMD_ARC_RIGHT;
-    reset_turn_controller();
-    return 1;
+			target_counts = INT32_MAX;              // sentinel: distance won't stop us
+			obstacle_stop_mode = OBST_MODE_IR_LEFT; // IR LEFT
+			uart_cmd = CMD_FORWARD;
+			seg_rebase = 1; // <--- rebase on entry
+			return 1;
+		}
 
-  case SCMD_ARC_FL:
-    TURN_DEG = (it.value >= 0) ? (float)it.value : -(float)it.value;
-    arc_target_angle = total_angle + TURN_DEG;
-    set_servo_left();
-    turn_motor_enable_tick = HAL_GetTick() + TURN_DELAY_LEFT; // <-- add
-    arc_postforward_cm = 0;
-    uart_cmd = CMD_ARC_LEFT;
-    reset_turn_controller();
-    return 1;
+		case SCMD_FWD_CM:
+		{
+			int cm = it.value;
+			enc_start_a = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
+			enc_start_b = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
+			target_angle = total_angle;
+			set_servo_center();
 
-  case SCMD_ARC_RR:
-    TURN_DEG = (it.value >= 0) ? (float)it.value : -(float)it.value;
-    arc_target_angle = total_angle + TURN_DEG;
-    set_servo_reverse_right();
-    turn_motor_enable_tick = HAL_GetTick() + TURN_DELAY; // <-- add
-    arc_postforward_cm = 1;
-    uart_cmd = CMD_ARC_RIGHT_REV;
-    reset_turn_controller();
-    return 1;
+			if (cm > 0)
+			{
+				// normal distance move
+				int32_t tgt = (int32_t)(cm * COUNTS_PER_CM + 0.5f);
+				target_counts = tgt;
+				obstacle_stop_mode = OBST_MODE_NONE; // ensure off
+				uart_cmd = CMD_FORWARD;
+			}
+			else
+			{
+				// use ultrasound just go forward forever
+				obstacle_stop_mode = OBST_MODE_US;
+				target_counts = INT32_MAX; // sentinel; we won't use it
+				odom_counts_run = 0;       // reset US segment odometer
+				odom_cm_run = 0.0f;
+				uart_cmd = CMD_FORWARD;
+			}
+			seg_rebase = 1; // <--- rebase on entry
+			return 1;
+		}
 
-  case SCMD_ARC_RL:
-    TURN_DEG = (it.value >= 0) ? (float)it.value : -(float)it.value;
-    arc_target_angle = total_angle - TURN_DEG;
-    set_servo_reverse_left();
-    turn_motor_enable_tick = HAL_GetTick() + TURN_DELAY; // <-- add
-    arc_postforward_cm = 0;
-    uart_cmd = CMD_ARC_LEFT_REV;
-    reset_turn_controller();
-    return 1;
+		case SCMD_REV_CM:
+		{
+			int cm = (it.value > 0) ? it.value : 50;
+			enc_start_a = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
+			enc_start_b = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
+			int32_t tgt = -(int32_t)(cm * COUNTS_PER_CM + 0.5f);
+			target_counts = tgt;
+			target_angle = total_angle;
+			set_servo_center();
+			uart_cmd = CMD_REVERSE;
+			seg_rebase = 1;
+			return 1;
+		}
 
-  case SCMD_STOP:
-    motor_brake();
-    stop_turn_controller();
-    set_servo_center();
-    uart_cmd = CMD_STOP;
-    return 1;
+		case SCMD_ARC_FR:
+		{
+			TURN_DEG = (it.value >= 0) ? (float)it.value : -(float)it.value;
+			arc_target_angle = total_angle - TURN_DEG;
+			set_servo_right();
 
-  case SCMD_EOS:
-    send_ack(); // <--- ACK the just-finished line
-                // Do NOT set uart_cmd; just return. The idle loop will pick up the next item
-    return 1;
+			#if TURN_SERVO_ONLY_TEST
+			turn_motor_enable_tick = HAL_GetTick() + TURN_SERVO_TEST_HOLD_MS;
+			#else
+			turn_motor_enable_tick = HAL_GetTick() + TURN_DELAY_RIGHT;
+			#endif
+			arc_postforward_cm = 0;
+			uart_cmd = CMD_ARC_RIGHT;
+			reset_turn_controller();
+			return 1;
+		}
 
-  case SCMD_SLIDE_R:
-  {
+		case SCMD_ARC_FL:
+		{
+			TURN_DEG = (it.value >= 0) ? (float)it.value : -(float)it.value;
+			arc_target_angle = total_angle + TURN_DEG;
+			set_servo_left();
 
-    // arm the slide state machine (RIGHT: heading goes -45)
-    slide_origin_heading = arc_target_angle; // save the current heading for slide back
-    //		slide_out_target = arc_target_angle - SLIDE_ANGLE_DEG;
-    slide_return_heading = arc_target_angle + SLIDE_ANGLE_DEG;
-    arc_target_angle = arc_target_angle - SLIDE_ANGLE_DEG;
-    //		arc_target_angle = arc_target_angle;
-    slide_mode = SLIDE_RIGHT;
-    slide_phase = SP_TURN_OUT;
-    // ensure we are in forward mode; if idle or not forward, start forward-forever
-    if (uart_cmd != CMD_FORWARD)
-    {
-      enc_start_a = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
-      enc_start_b = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
-      //            target_angle     = total_angle;
-      //            arc_target_angle = total_angle;           // lock straight reference
-      set_servo_center();
+			#if TURN_SERVO_ONLY_TEST
+			turn_motor_enable_tick = HAL_GetTick() + TURN_SERVO_TEST_HOLD_MS;
+			#else
+			turn_motor_enable_tick = HAL_GetTick() + TURN_DELAY_LEFT;
+			#endif
+			arc_postforward_cm = 0;
+			uart_cmd = CMD_ARC_LEFT;
+			reset_turn_controller();
+			return 1;
+		}
 
-      target_counts = INT32_MAX; // forward "forever"
-      obstacle_stop_mode = OBST_MODE_NONE;
-      uart_cmd = CMD_FORWARD;
-    }
+		case SCMD_ARC_RR:
+		{
+			TURN_DEG = (it.value >= 0) ? (float)it.value : -(float)it.value;
+			arc_target_angle = total_angle + TURN_DEG;
+			set_servo_reverse_right();
 
-    return 1;
-  }
+			#if TURN_SERVO_ONLY_TEST
+			turn_motor_enable_tick = HAL_GetTick() + TURN_SERVO_TEST_HOLD_MS;
+			#else
+			turn_motor_enable_tick = HAL_GetTick() + TURN_DELAY;
+			#endif
+			arc_postforward_cm = 1;
+			uart_cmd = CMD_ARC_RIGHT_REV;
+			reset_turn_controller();
+			return 1;
+		}
 
-  case SCMD_SLIDE_L:
-  {
+		case SCMD_ARC_RL:
+		{
+			TURN_DEG = (it.value >= 0) ? (float)it.value : -(float)it.value;
+			arc_target_angle = total_angle - TURN_DEG;
+			set_servo_reverse_left();
 
-    // arm the slide state machine (LEFT: heading goes +45)
-    slide_origin_heading = arc_target_angle;
-    //    		slide_out_target = arc_target_angle + SLIDE_ANGLE_DEG;
-    slide_return_heading = arc_target_angle - SLIDE_ANGLE_DEG;
-    arc_target_angle = arc_target_angle + SLIDE_ANGLE_DEG;
-    //		arc_target_angle = arc_target_angle;
-    slide_mode = SLIDE_LEFT;
-    slide_phase = SP_TURN_OUT;
-    // ensure we are in forward mode; if idle or not forward, start forward-forever
-    if (uart_cmd != CMD_FORWARD)
-    {
-      enc_start_a = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
-      enc_start_b = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
-      //                target_angle     = total_angle;
-      //                arc_target_angle = total_angle;           // lock straight reference
-      set_servo_center();
+			#if TURN_SERVO_ONLY_TEST
+			turn_motor_enable_tick = HAL_GetTick() + TURN_SERVO_TEST_HOLD_MS;
+			#else
+			turn_motor_enable_tick = HAL_GetTick() + TURN_DELAY;
+			#endif
+			arc_postforward_cm = 0;
+			uart_cmd = CMD_ARC_LEFT_REV;
+			reset_turn_controller();
+			return 1;
+		}
 
-      target_counts = INT32_MAX; // forward "forever"
-      obstacle_stop_mode = OBST_MODE_NONE;
-      uart_cmd = CMD_FORWARD;
-    }
+		case SCMD_STOP:
+		{
+			motor_brake();
+			stop_turn_controller();
+			set_servo_center();
+			uart_cmd = CMD_STOP;
+			return 1;
+		}
 
-    return 1;
-  }
+		case SCMD_EOS:
+		{
+			send_ack(); // <--- ACK the just-finished line
+			// Do NOT set uart_cmd; just return. The idle loop will pick up the next item
+			return 1;
+		}
 
-  default:
-    break;
-  }
-  return 0;
+		case SCMD_SLIDE_R:
+		{
+			// arm the slide state machine (RIGHT: heading goes -45)
+			slide_origin_heading = arc_target_angle; // save the current heading for slide back
+			//		slide_out_target = arc_target_angle - SLIDE_ANGLE_DEG;
+			slide_return_heading = arc_target_angle + SLIDE_ANGLE_DEG;
+			arc_target_angle = arc_target_angle - SLIDE_ANGLE_DEG;
+			//		arc_target_angle = arc_target_angle;
+			slide_mode = SLIDE_RIGHT;
+			slide_phase = SP_TURN_OUT;
+			// ensure we are in forward mode; if idle or not forward, start forward-forever
+			if (uart_cmd != CMD_FORWARD)
+			{
+				enc_start_a = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
+				enc_start_b = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
+				//            target_angle     = total_angle;
+				//            arc_target_angle = total_angle;           // lock straight reference
+				set_servo_center();
+
+				target_counts = INT32_MAX; // forward "forever"
+				obstacle_stop_mode = OBST_MODE_NONE;
+				uart_cmd = CMD_FORWARD;
+			}
+
+			return 1;
+		}
+
+		case SCMD_SLIDE_L:
+		{
+			// arm the slide state machine (LEFT: heading goes +45)
+			slide_origin_heading = arc_target_angle;
+			//    		slide_out_target = arc_target_angle + SLIDE_ANGLE_DEG;
+			slide_return_heading = arc_target_angle - SLIDE_ANGLE_DEG;
+			arc_target_angle = arc_target_angle + SLIDE_ANGLE_DEG;
+			//		arc_target_angle = arc_target_angle;
+			slide_mode = SLIDE_LEFT;
+			slide_phase = SP_TURN_OUT;
+			// ensure we are in forward mode; if idle or not forward, start forward-forever
+			if (uart_cmd != CMD_FORWARD)
+			{
+				enc_start_a = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
+				enc_start_b = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
+				//                target_angle     = total_angle;
+				//                arc_target_angle = total_angle;           // lock straight reference
+				set_servo_center();
+
+				target_counts = INT32_MAX; // forward "forever"
+				obstacle_stop_mode = OBST_MODE_NONE;
+				uart_cmd = CMD_FORWARD;
+			}
+
+			return 1;
+		}
+
+		default:
+		break;
+		}
+	return 0;
 }
 
 // ultrasound
@@ -2605,79 +2663,91 @@ void oledTask(void const * argument)
 /* USER CODE END Header_motorTask */
 void motorTask(void const * argument)
 {
-  /* USER CODE BEGIN motorTask */
+	/* USER CODE BEGIN motorTask */
 
-  /*--------- SERVO ---------------- */
-  HAL_TIM_PWM_Start(&htim12, TIM_CHANNEL_2);
+	steering_homed = 0U;
 
-  //    osDelay(3000);
-  set_servo_center();
-  //    osDelay(3000);
+	// PWM channels not active yet, simply prepares registers
+	left_coast();
+	right_coast();
 
-  /* DC MOTOR */
-  // both generate PWM signal
+	// MOTORA Start PWM
+	HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_3); // PB8 -> IN2
+	HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_4); // PB9 -> IN1
 
-  // MOTORA Start PWM
-  HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_3); // PB8 -> IN2
-  HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_4); // PB9 -> IN1
+	// MOTORB Start PWM
+	HAL_TIM_PWM_Start(&htim9, TIM_CHANNEL_1); //
+	HAL_TIM_PWM_Start(&htim9, TIM_CHANNEL_2); //
 
-  // MOTORB Start PWM
-  HAL_TIM_PWM_Start(&htim9, TIM_CHANNEL_1); //
-  HAL_TIM_PWM_Start(&htim9, TIM_CHANNEL_2); //
+	motor_brake(); // actively brake to reduce movement
 
-  Manual_Init(&manual_control); // luther controller
+	osDelay(STEERING_HOME_BRAKE_SETTLE_MS); // delay
 
-  motor_brake(); // start safe
-                 /* Infinite loop */
-  char command_line[sizeof(pending_cmd_buf)];
-  for (;;)
-  {
-    if (pending_cmd_ready)
-    {
-      uint32_t primask = __get_PRIMASK();
-      __disable_irq();
-      memcpy(command_line, pending_cmd_buf, sizeof(command_line));
-      pending_cmd_ready = 0U;
-      if (primask == 0U)
-        __enable_irq();
+	htim12.Instance->CCR2 = SERVO_HOME_RIGHT_CCR; //Set CCR BEFORE enabling servo PWM.
 
-      command_line[sizeof(command_line) - 1U] = '\0';
-      for (size_t index = 0U; command_line[index] != '\0'; ++index)
-      {
-        if (command_line[index] >= 'A' && command_line[index] <= 'Z')
-          command_line[index] = (char)(command_line[index] - 'A' + 'a');
-        if (command_line[index] == ';' || command_line[index] == ',')
-          command_line[index] = ' ';
-      }
+	HAL_TIM_PWM_Start(&htim12, TIM_CHANNEL_2); //Enable only the steering servo PWM.
 
-      parse_and_enqueue_script(command_line);
-      if (uart_cmd == CMD_NONE && !abort_now)
-        (void)start_next_from_queue();
-    }
+	home_steering_from_right();
 
-    /* Every motion mode depends on valid heading feedback. Never continue a
-     * command with a failed or stale gyro. */
-    if (uart_cmd != CMD_NONE && uart_cmd != CMD_STOP)
-    {
-      const uint32_t now = HAL_GetTick();
-      const bool stale = gyro_healthy &&
-                         ((uint32_t)(now - gyro_last_good_tick) >
-                          GYRO_STALE_TIMEOUT_MS);
+	while (!gyro_healthy)
+	{
+		osDelay(20);
+	}
 
-      if (!gyro_healthy || stale)
-      {
-        Telemetry_RecordFault(stale ? "GYRO_STALE" : "GYRO_NOT_READY");
-        abort_now = 1U;
-      }
-    }
+	motor_brake();
+
+	Manual_Init(&manual_control);
+
+	char command_line[sizeof(pending_cmd_buf)];
+
+	for (;;)
+	{
+	if (pending_cmd_ready)
+	{
+	  uint32_t primask = __get_PRIMASK();
+	  __disable_irq();
+	  memcpy(command_line, pending_cmd_buf, sizeof(command_line));
+	  pending_cmd_ready = 0U;
+	  if (primask == 0U)
+		__enable_irq();
+
+	  command_line[sizeof(command_line) - 1U] = '\0';
+	  for (size_t index = 0U; command_line[index] != '\0'; ++index)
+	  {
+		if (command_line[index] >= 'A' && command_line[index] <= 'Z')
+		  command_line[index] = (char)(command_line[index] - 'A' + 'a');
+		if (command_line[index] == ';' || command_line[index] == ',')
+		  command_line[index] = ' ';
+	  }
+
+	  parse_and_enqueue_script(command_line);
+	  if (uart_cmd == CMD_NONE && !abort_now)
+		(void)start_next_from_queue();
+	}
+
+	/* Every motion mode depends on valid heading feedback. Never continue a
+	 * command with a failed or stale gyro. */
+	if (uart_cmd != CMD_NONE && uart_cmd != CMD_STOP)
+	{
+	  const uint32_t now = HAL_GetTick();
+	  const bool stale = gyro_healthy &&
+						 ((uint32_t)(now - gyro_last_good_tick) >
+						  GYRO_STALE_TIMEOUT_MS);
+
+	  if (!gyro_healthy || stale)
+	  {
+		Telemetry_RecordFault(stale ? "GYRO_STALE" : "GYRO_NOT_READY");
+		abort_now = 1U;
+	  }
+	}
 
 
-    // emergency-stop
-    if (abort_now)
-    {
+	// emergency-stop
+	if (abort_now)
+	{
 
-    	const int interrupted_command = (int)uart_cmd;
-    	manual_exit();
+		const int interrupted_command = (int)uart_cmd;
+		manual_exit();
 
 		abort_now = 0;
 		obstacle_stop_mode = OBST_MODE_NONE;
@@ -2742,62 +2812,61 @@ void motorTask(void const * argument)
 		/* Skip normal motor processing and restart the motor loop. */
 		continue;
 
-    }
+	}
 
-    if (manual_service())
-    {
-    	osDelay(5);
-    	continue;
-    }
+	if (manual_service())
+	{
+		osDelay(5);
+		continue;
+	}
 
-    switch (uart_cmd)
-    {
-    case CMD_FORWARD:
-    case CMD_REVERSE:
-    {
-      // ====== Tunables (keep Ki small if no anti-windup) ======
-      //          const int   base_pwm = PWM_RUN;     // e.g., 4000
-      const float Kp = 0.003f; // 0.05
-      const float Ki = 0.003f; // 0.003        // start smaller without anti-windup
-      const float Kd = 0.000f; // 0.001
+	switch (uart_cmd)
+	{
+	case CMD_FORWARD:
+	case CMD_REVERSE:
+	{
+	  // ====== Tunables (keep Ki small if no anti-windup) ======
+	  //          const int   base_pwm = PWM_RUN;     // e.g., 4000
+	  const float Kp = 0.003f; // 0.05
+	  const float Ki = 0.003f; // 0.003        // start smaller without anti-windup
+	  const float Kd = 0.000f; // 0.001
 
-      // best run kp=0.3, ki=0.003, kd=0.001
-      // new best run kp = 0.003, ki = 0.003, kd = 0
-      //  ====== Persistent PID state ======
-      static int32_t i_acc = 0;
-      static int32_t prev_err = 0;
-      static float cpsA_f = 0.0f;
-      static float cpsB_f = 0.0f;
+	  // best run kp=0.3, ki=0.003, kd=0.001
+	  // new best run kp = 0.003, ki = 0.003, kd = 0
+	  //  ====== Persistent PID state ======
+	  static int32_t i_acc = 0;
+	  static int32_t prev_err = 0;
+	  static float cpsA_f = 0.0f;
+	  static float cpsB_f = 0.0f;
 
-      /*
-       * Straight speed-profile state. luther
-       *
-       * 0%   -> essentially zero motor drive
-       * 100% -> calibrated PWM_RUN motor drive
-       */
-      static float drive_profile_percent = 0.0f;
-      static uint32_t drive_profile_last_tick = 0U;
-      static int drive_profile_direction = 0;
+	  /*
+	   * Straight speed-profile state. luther
+	   *
+	   * 0%   -> essentially zero motor drive
+	   * 100% -> calibrated PWM_RUN motor drive
+	   */
+	  static float drive_profile_percent = 0.0f;
+	  static uint32_t drive_profile_last_tick = 0U;
 
-      /* 32-bit segment distance accumulator. The hardware encoder counters are
-       * only 16-bit, so subtracting the command-start counter directly fails
-       * once a move exceeds about 32767 encoder counts (roughly 4.4 m here).
-       * Small wrap-safe deltas are accumulated into int32_t instead. */
-      static uint16_t dist_last_a = 0U;
-      static uint16_t dist_last_b = 0U;
-      static int32_t dist_accum_a = 0;
-      static int32_t dist_accum_b = 0;
-      static int dist_direction = 0;
-      static uint8_t dist_initialized = 0U;
+	  /* 32-bit segment distance accumulator. The hardware encoder counters are
+	   * only 16-bit, so subtracting the command-start counter directly fails
+	   * once a move exceeds about 32767 encoder counts (roughly 4.4 m here).
+	   * Small wrap-safe deltas are accumulated into int32_t instead. */
+	  static uint16_t dist_last_a = 0U;
+	  static uint16_t dist_last_b = 0U;
+	  static int32_t dist_accum_a = 0;
+	  static int32_t dist_accum_b = 0;
+	  static int dist_direction = 0;
+	  static uint8_t dist_initialized = 0U;
 
-      uint16_t now_a = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
-      uint16_t now_b = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
-      const int commanded_direction = (uart_cmd == CMD_REVERSE) ? -1 : 1;
-      uint32_t profile_now = HAL_GetTick();
+	  uint16_t now_a = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
+	  uint16_t now_b = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
+	  const int commanded_direction = (uart_cmd == CMD_REVERSE) ? -1 : 1;
+	  uint32_t profile_now = HAL_GetTick();
 
-      if (!dist_initialized || seg_rebase || dist_direction != commanded_direction)
-      {
-    	  dist_last_a = now_a;
+	  if (!dist_initialized || seg_rebase || dist_direction != commanded_direction)
+	  {
+		  dist_last_a = now_a;
 		  dist_last_b = now_b;
 
 		  dist_accum_a = 0;
@@ -2812,906 +2881,943 @@ void motorTask(void const * argument)
 		   */
 		  drive_profile_percent = 0.0f;
 		  drive_profile_last_tick = profile_now;
-		  drive_profile_direction = commanded_direction;
-      }
-      else
-      {
-        dist_accum_a += (int16_t)(now_a - dist_last_a);
-        dist_accum_b += -(int16_t)(now_b - dist_last_b);
-        dist_last_a = now_a;
-        dist_last_b = now_b;
-      }
-
-      uint32_t profile_dt_ms = profile_now - drive_profile_last_tick;
-
-      drive_profile_last_tick = profile_now;
-
-      /* Prevent an unusual task delay from making one giant ramp step. luther */
-      if (profile_dt_ms > 50U)
-      {
-          profile_dt_ms = 50U;
-      }
-
-      int32_t avg_moved = (dist_accum_a + dist_accum_b) / 2;
-
-      // Remaining distance in encoder counts. Keep it positive regardless of FWD/REV direction. luther
-      int32_t remaining_counts;
-
-      if (commanded_direction > 0)
-      {
-          remaining_counts = target_counts - avg_moved;
-      }
-      else
-      {
-          remaining_counts = avg_moved - target_counts;
-      }
-
-      if (remaining_counts < 0)
-      {
-          remaining_counts = 0;
-      }
-
-      // ====== Stop conditions ======
-      bool done_by_counts = false;
-      if (target_counts >= 0)
-      {
-        done_by_counts = (avg_moved >= target_counts);
-      }
-      else
-      {
-        done_by_counts = (avg_moved <= target_counts);
-      }
-
-      bool done_by_obst = false;
-      if (uart_cmd == CMD_FORWARD && obstacle_stop_mode != OBST_MODE_NONE)
-      {
-        switch (obstacle_stop_mode)
-        {
-
-        case OBST_MODE_US_T:
-          // Stop condition for FUxx: ultrasound <= per-move threshold
-          done_by_obst = (echo_debug <= us_stop_cm);
-
-          // If extremely close, reverse only if allowed (FU), otherwise just stop (FX)
-          if (echo_debug <= OBSTACLE_REV_CM && us_allow_reverse)
-          {
-
-            // Optional: send an immediate “collision-close” marker (like your US mode)
-            if (!uart3_tx_busy)
-            {
-              char us_msg[32];
-              int n = snprintf(us_msg, sizeof(us_msg), "us0.0,%d\n", (int)echo_debug);
-              uart3_tx_busy = 1;
-              HAL_UART_Transmit_IT(&huart3, (uint8_t *)us_msg, (uint16_t)n);
-            }
-
-            // Keep heading straight; hand over to reverse controller
-            target_angle = arc_target_angle;
-            set_servo_center();
-
-            obstacle_stop_mode = OBST_MODE_US_BACK; // reuse your existing reverse-clear mode
-            target_counts = INT32_MIN + 1;          // sentinel: counts won’t finish it
-
-            // Clean PID handover
-            i_acc = 0;
-            prev_err = 0;
-
-            done_by_obst = false; // we’re not finishing here; switching to REVERSE
-            seg_rebase = 1;
-            uart_cmd = CMD_REVERSE;
-          }
-          break;
-
-        case OBST_MODE_US:
-          // ultrasound: stop when we are closer than threshold
-          done_by_obst = (echo_debug <= OBSTACLE_STOP_CM);
-          // reverse
-
-          if (echo_debug <= OBSTACLE_REV_CM)
-          { // reverse bump
-
-            if (!uart3_tx_busy)
-            {
-              char us_msg[32];
-              int n = snprintf(us_msg, sizeof(us_msg), "us0.0,%d\n",
-                               (int)echo_debug);
-              uart3_tx_busy = 1;
-              HAL_UART_Transmit_IT(&huart3, (uint8_t *)us_msg, (uint16_t)n);
-            }
-
-            // Keep heading straight
-            target_angle = arc_target_angle;
-            set_servo_center();
-
-            // --- switch to reverse-until-clear mode ---
-            //						  odom_counts_run = 0;                  // track how far we reverse
-            obstacle_stop_mode = OBST_MODE_US_BACK;
-            target_counts = INT32_MIN + 1; // sentinel so counts never end us
-
-            // Clean PID handover
-            i_acc = 0;
-            prev_err = 0;
-
-            done_by_obst = false;
-            seg_rebase = 1; // <--- rebase on entry
-            uart_cmd = CMD_REVERSE;
-          }
-          break;
-        case OBST_MODE_IR_RIGHT:
-          // FIR semantics: keep moving UNTIL right-IR says "no obstacle" (0)
-          // -> stop when ir1_obs == 0
-          done_by_obst = (ir1_obs == 0); // PC1
-          break;
-        case OBST_MODE_IR_LEFT:
-          done_by_obst = (ir0_obs == 0); // PC0
-          break;
-
-        case OBST_MODE_IR_RIGHT_O: // NEW firo (stop when obstacle IS present)
-          done_by_obst = (ir1_obs == 1);
-          break;
-
-        case OBST_MODE_IR_LEFT_O: // NEW filo (stop when obstacle IS present)
-          done_by_obst = (ir0_obs == 1);
-          break;
-        default:
-          break;
-        }
-      }
-
-      if (uart_cmd == CMD_REVERSE && obstacle_stop_mode == OBST_MODE_US_BACK)
-      {
-        done_by_obst = (echo_debug >= US_BACK_CLEAR_CM);
-      }
-
-      // transmit US distance travelled and detected
-      if (done_by_obst && (obstacle_stop_mode == OBST_MODE_US || obstacle_stop_mode == OBST_MODE_US_T))
-      {
-        odom_cm_run = (float)odom_counts_run / COUNTS_PER_CM;
-
-        if (!uart3_tx_busy)
-        {
-          char us_msg[32];
-          int n = snprintf(us_msg, sizeof(us_msg), "us%.1f,%d\n",
-                           (double)odom_cm_run, (int)echo_debug);
-          uart3_tx_busy = 1;
-          HAL_UART_Transmit_IT(&huart3, (uint8_t *)us_msg, (uint16_t)n);
-        }
-      }
-
-      // transmit IR distance travelled
-      if (done_by_obst && (obstacle_stop_mode == OBST_MODE_IR_RIGHT || obstacle_stop_mode == OBST_MODE_IR_LEFT))
-      {
-        odom_cm_run_ir = (float)odom_counts_run_ir / COUNTS_PER_CM;
-
-        if (!uart3_tx_busy)
-        {
-          char ir_msg[32];
-          int n = snprintf(ir_msg, sizeof(ir_msg), "ir%.1f\n", (double)odom_cm_run_ir);
-          uart3_tx_busy = 1;
-          HAL_UART_Transmit_IT(&huart3, (uint8_t *)ir_msg, (uint16_t)n);
-        }
-      }
-
-      if (done_by_counts || done_by_obst)
-      {
-        motor_brake();
-        obstacle_stop_mode = OBST_MODE_NONE; // clear mode
-        i_acc = 0;
-        prev_err = 0; // reset PID state
-        // send_ack_one_cmd();    // commented out (RYAN TOLD TO)
-        uart_cmd = CMD_NONE;
-        next_start_tick = HAL_GetTick() + INTER_CMD_MS;
-        break;
-      }
-
-      // ====== Wheel speeds (counts per second) @ ~10 ms ======
-      static uint16_t last_a = 0, last_b = 0;
-      static uint32_t last_t = 0;
-      uint32_t t = HAL_GetTick();
-
-      if (last_t == 0)
-      {
-        last_t = t;
-        last_a = now_a;
-        last_b = now_b;
-      }
-
-      // If a new segment just started, rebase baselines and skip this tick’s accumulation
-      if (seg_rebase)
-      {
-        last_a = now_a;
-        last_b = now_b;
-        last_t = t;
-        seg_rebase = 0;
-        cpsA_f = 0.0f;
-        cpsB_f = 0.0f;
-
-
-        // optional: also clear PID transients to avoid a kick
-        i_acc = 0;
-        prev_err = 0;
-
-        // Do NOT compute da/db or update odometers this tick
-      }
-
-      int16_t da = (int16_t)(now_a - last_a);
-      int16_t db = (int16_t)(now_b - last_b);
-      db = -db; // keep right reversed consistently
-
-      // record distance travelled during US/FIR/FIL movement
-      if (uart_cmd == CMD_FORWARD && (obstacle_stop_mode == OBST_MODE_US || obstacle_stop_mode == OBST_MODE_US_T))
-      {
-        int32_t inc_counts = ((int32_t)da + (int32_t)db) / 2;
-        odom_counts_run += inc_counts;
-      }
-
-      if (uart_cmd == CMD_FORWARD && (obstacle_stop_mode == OBST_MODE_IR_RIGHT || obstacle_stop_mode == OBST_MODE_IR_LEFT))
-      {
-        int32_t inc_counts = ((int32_t)da + (int32_t)db) / 2;
-        odom_counts_run_ir += inc_counts;
-      }
-
-      uint32_t dt_ms = (t - last_t);
-      if (dt_ms == 0)
-        dt_ms = 1;
-
-      int32_t cpsA = (int32_t)da * 1000 / (int32_t)dt_ms;
-      int32_t cpsB = (int32_t)db * 1000 / (int32_t)dt_ms;
-
-      // ---- Low-pass filter for PID feedback ----
-      //static float cpsA_f = 0.0f, cpsB_f = 0.0f; // filtered cps
-      float dt_s = (float)dt_ms / 1000.0f;
-      float alpha = dt_s / (SPEED_LPF_TAU + dt_s); // 0<alpha<1, automatic with your dt
-
-      cpsA_f += alpha * ((float)cpsA - cpsA_f);
-      cpsB_f += alpha * ((float)cpsB - cpsB_f);
-
-      last_a = now_a;
-      last_b = now_b;
-      last_t = t;
-
-      //          // ====== Plain PID on speed difference ===== // SOMETHING WRONG HERE?
-      //          int32_t err = (int32_t)(cpsA_f - cpsB_f); //filtered values
-      ////          int32_t err = (cpsA - cpsB);
-
-      // ====== Plain PID on speed difference WITH GYRO FEEDBACK =====
-      // Speed-based error (motor balance)
-      int32_t speed_err = (int32_t)(cpsA_f - cpsB_f); // filtered values
-
-      // Calculate heading error BEFORE using it for gyro feedback
-      error_angle = target_angle - total_angle;
-
-      /* Wheel PI balances encoder speeds. Heading is corrected by the servo
-       * below. Feeding yaw into both loops makes them fight each other. */
-      int32_t err = speed_err;
-
-      i_acc += err;
-      const int32_t IACC_CLAMP = 25000;
-      if (i_acc > IACC_CLAMP)
-        i_acc = IACC_CLAMP;
-      if (i_acc < -IACC_CLAMP)
-        i_acc = -IACC_CLAMP;
-
-      int32_t d = err - prev_err;
-      prev_err = err;
-
-      float off_f = Kp * (float)err + Ki * (float)i_acc + Kd * (float)d;
-      int off = (int)off_f;
-      //int off = 0;
-
-      /*
-       * Select the same calibrated full-speed compare used by scripted F/R.
-       * In manual straight mode, throttle only interpolates from brake/zero
-       * drive (PWM_MAX) to that already-calibrated full-speed point. At 100%
-       * the values are exactly the same as a normal scripted F/R command.
-       */
-      //start new acceleration luther
-      const bool is_reverse = (uart_cmd == CMD_REVERSE);
-
-      const bool manual_straight =
-          manual_control.owns_motors &&
-          manual_motion_kind == MANUAL_MOTION_STRAIGHT;
-
-      /*
-       * Requested level before applying the scripted acceleration/deceleration
-       * profile.
-       */
-      float requested_percent = manual_straight ? (float)manual_throttle_percent : 100.0f;
-
-      /*
-       * Apply the automatic motion profile only to normal finite F/R commands.
-       *
-       * Emergency/obstacle/manual stops should retain their immediate safety
-       * behaviour.
-       */
-      const bool finite_scripted_move =
-          !manual_straight &&
-          obstacle_stop_mode == OBST_MODE_NONE &&
-          target_counts != INT32_MAX &&
-          target_counts != (INT32_MIN + 1);
-
-      float profile_target = requested_percent;
-
-      if (finite_scripted_move)
-      {
-          /*
-           * Planned deceleration during the last STRAIGHT_DECEL_CM.
-           */
-          const float decel_counts =
-              STRAIGHT_DECEL_CM * COUNTS_PER_CM;
-
-          if ((float)remaining_counts < decel_counts)
-          {
-              float remaining_fraction =
-                  (float)remaining_counts / decel_counts;
-
-              if (remaining_fraction < 0.0f)
-                  remaining_fraction = 0.0f;
-
-              if (remaining_fraction > 1.0f)
-                  remaining_fraction = 1.0f;
-
-              /*
-               * 100% at start of deceleration zone,
-               * DECEL_MIN_PERCENT at the target.
-               */
-              float decel_percent =
-                  STRAIGHT_DECEL_MIN_PERCENT +
-                  (100.0f - STRAIGHT_DECEL_MIN_PERCENT) *
-                  remaining_fraction;
-
-              if (decel_percent < profile_target)
-              {
-                  profile_target = decel_percent;
-              }
-          }
-
-          /*
-           * Acceleration slew:
-           *
-           * 0 -> 100% over STRAIGHT_ACCEL_RAMP_MS.
-           */
-          float accel_step =
-              100.0f *
-              (float)profile_dt_ms /
-              (float)STRAIGHT_ACCEL_RAMP_MS;
-
-          if (drive_profile_percent < profile_target)
-          {
-              drive_profile_percent += accel_step;
-
-              if (drive_profile_percent > profile_target)
-              {
-                  drive_profile_percent = profile_target;
-              }
-          }
-          else
-          {
-              /*
-               * Deceleration target moves gradually as remaining distance
-               * decreases, so follow it directly.
-               */
-              drive_profile_percent = profile_target;
-          }
-      }
-      else
-      {
-          /*
-           * Manual/obstacle modes keep existing behaviour for now.
-           */
-          drive_profile_percent = requested_percent;
-      }
-
-      if (drive_profile_percent < 0.0f)
-          drive_profile_percent = 0.0f;
-
-      if (drive_profile_percent > 100.0f)
-          drive_profile_percent = 100.0f;
-
-      const int throttle_percent =
-          (int)(drive_profile_percent + 0.5f);
-      //end new acceleration luther
-
-      const float left_compare_scale =
-          is_reverse ? REV_LEFT_COMPARE_SCALE : FWD_LEFT_COMPARE_SCALE;
-      const float right_compare_scale =
-          is_reverse ? REV_RIGHT_COMPARE_SCALE : FWD_RIGHT_COMPARE_SCALE;
-
-      const int full_base_L = clamp_pwm_compare(
-          (int)((float)PWM_RUN * left_compare_scale + 0.5f));
-      const int full_base_R = clamp_pwm_compare(
-          (int)((float)PWM_RUN * right_compare_scale + 0.5f));
-
-      int base_L = PWM_MAX -
-          ((PWM_MAX - full_base_L) * throttle_percent) / 100;
-      int base_R = PWM_MAX -
-          ((PWM_MAX - full_base_R) * throttle_percent) / 100;
-
-      /* Keep PI correction proportional to requested manual drive at partial
-       * stick throttle. Scripted commands remain unchanged at 100%. */
-      if (manual_control.owns_motors && throttle_percent < 100)
-          off = (off * throttle_percent) / 100;
-
-      int lDuty;
-      int rDuty;
-
-      if (!is_reverse)
-      {
-          /*
-           * Larger compare = less power.
-           * Positive off slows left and speeds up right.
-           */
-          lDuty = base_L + off;
-          rDuty = base_R - off;
-      }
-      else
-      {
-          /*
-           * Encoder speeds are negative in reverse, so the correction
-           * direction must be inverted.
-           */
-          lDuty = base_L - off;
-          rDuty = base_R + off;
-      }
-
-      lDuty = clamp_pwm_compare(lDuty);
-      rDuty = clamp_pwm_compare(rDuty);
-
-      /* Save actual straight motor controller outputs for telemetry. */
-      straight_left_pwm = lDuty;
-      straight_right_pwm = rDuty;
-
-      // Hold the heading captured at the start of THIS straight segment.
-      error_angle = target_angle - total_angle;
-
-      /* =========================================================
-       * Straight-line gyro heading correction
-       * ========================================================= */
-
-      float steering_error = error_angle;
-
-      /* Ignore tiny gyro noise. */
-      if (fabsf(steering_error) < STRAIGHT_STEER_DEADBAND_DEG)
-      {
-          steering_error = 0.0f;
-      }
-
-      /*
-       * First calculate controller output as a percentage of
-       * available steering travel rather than raw CCR counts.
-       */
-      float correction_percent =
-          STRAIGHT_STEER_KP_PERCENT_PER_DEG * steering_error;
-
-      /*
-       * Once outside the deadband, make sure the servo moves enough
-       * to overcome linkage/servo dead travel.
-       */
-      if (steering_error != 0.0f &&
-          fabsf(correction_percent) < STRAIGHT_STEER_MIN_PERCENT)
-      {
-          correction_percent =
-              (correction_percent > 0.0f)
-                  ? STRAIGHT_STEER_MIN_PERCENT
-                  : -STRAIGHT_STEER_MIN_PERCENT;
-      }
-
-      /* Limit heading correction. */
-      if (correction_percent > STRAIGHT_STEER_MAX_PERCENT)
-      {
-          correction_percent = STRAIGHT_STEER_MAX_PERCENT;
-      }
-      else if (correction_percent < -STRAIGHT_STEER_MAX_PERCENT)
-      {
-          correction_percent = -STRAIGHT_STEER_MAX_PERCENT;
-      }
-
-      /*
-       * Convert yaw correction into physical steering direction.
-       *
-       * Positive physical_steer_percent = RIGHT
-       * Negative physical_steer_percent = LEFT
-       *
-       * Reverse requires the steering correction direction to flip.
-       */
-      float physical_steer_percent;
-
-      if (uart_cmd == CMD_FORWARD)
-      {
-          physical_steer_percent = -correction_percent;
-      }
-      else
-      {
-          physical_steer_percent = correction_percent;
-      }
-
-      /* Use the current calibrated centre. */
-      int center = (int)current_center_ccr;
-
-      /*
-       * Use the appropriate steering endpoints for the direction
-       * of travel.
-       */
-      int left_limit;
-      int right_limit;
-
-      if (uart_cmd == CMD_REVERSE)
-      {
-          left_limit = SERVO_REVERSE_LEFT_CCR;
-          right_limit = SERVO_REVERSE_RIGHT_CCR;
-      }
-      else
-      {
-          left_limit = SERVO_LEFT_CCR;
-          right_limit = SERVO_RIGHT_CCR;
-      }
-
-      int servo = center;
-
-      if (physical_steer_percent > 0.0f)
-      {
-          /* RIGHT steering */
-          float available = (float)(right_limit - center);
-
-          servo = center +
-              (int)lroundf(
-                  available *
-                  physical_steer_percent /
-                  100.0f
-              );
-      }
-      else if (physical_steer_percent < 0.0f)
-      {
-          /* LEFT steering */
-          float available = (float)(center - left_limit);
-
-          servo = center +
-              (int)lroundf(
-                  available *
-                  physical_steer_percent /
-                  100.0f
-              );
-      }
-
-      /* Final mechanical safety clamp. */
-      if (servo < left_limit)
-      {
-          servo = left_limit;
-      }
-
-      if (servo > right_limit)
-      {
-          servo = right_limit;
-      }
-
-      /* Save controller state for telemetry. */
-      straight_servo_center_ccr = center;
-      straight_steer_percent = physical_steer_percent;
-      straight_servo_ccr = servo;
-
-      // add sliding right
-      // === Slide state machine overrides servo while active ===
-      if (slide_mode != SLIDE_NONE)
-      {
-
-        if (slide_phase == SP_TURN_OUT)
-        {
-          // steer toward target side until reaching ±45° from origin
-          htim12.Instance->CCR2 = (slide_mode == SLIDE_RIGHT) ? SERVO_SLIDERIGHT_CCR : SERVO_SLIDELEFT_CCR;
-
-          if (slide_mode == SLIDE_RIGHT)
-          {
-            // Right slide -> steer right, so LEFT is outer, RIGHT is inner
-            int outer = (int)(SLIDE_OUTER_PWM);
-            int inner = (int)(SLIDE_INNER_PWM);
-            left_forward_duty(outer);
-            right_forward_duty(inner);
-          }
-          else
-          { // SLIDE_LEFT
-            // Left slide -> steer left, so RIGHT is outer, LEFT is inner
-            int outer = (int)(SLIDE_OUTER_PWM);
-            int inner = (int)(SLIDE_INNER_PWM);
-            right_forward_duty(outer);
-            left_forward_duty(inner);
-          }
-          if ((slide_mode == SLIDE_RIGHT && total_angle <= arc_target_angle) ||
-              (slide_mode == SLIDE_LEFT && total_angle >= arc_target_angle))
-          {
-            slide_phase = SP_TURN_IN; // start coming back
-          }
-        }
-        else if (slide_phase == SP_TURN_IN)
-        {
-          // steer opposite side until we’re back at original heading (within tolerance)
-          htim12.Instance->CCR2 = (slide_mode == SLIDE_RIGHT) ? SERVO_SLIDELEFT_CCR : SERVO_SLIDERIGHT_CCR;
-
-          if (slide_mode == SLIDE_RIGHT)
-          {
-            // Coming back from right -> steer left, so RIGHT is outer now
-            int outer = (int)(SLIDE_OUTER_PWM);
-            int inner = (int)(SLIDE_INNER_PWM);
-            right_forward_duty(outer);
-            left_forward_duty(inner);
-          }
-          else
-          { // SLIDE_LEFT
-            // Coming back from left -> steer right, so LEFT is outer now
-            int outer = (int)(SLIDE_OUTER_PWM);
-            int inner = (int)(SLIDE_INNER_PWM);
-            left_forward_duty(outer);
-            right_forward_duty(inner);
-          }
-          arc_target_angle = slide_origin_heading;
-
-          if ((slide_mode == SLIDE_RIGHT && total_angle >= arc_target_angle - 5.0) || // slide_return_heading
-              (slide_mode == SLIDE_LEFT && total_angle <= arc_target_angle + 5.0))
-          {
-            const slide_t completed_slide = slide_mode;
-            // done: hand back to your normal straight-line hold
-            //						slide_phase = SP_RECENTER;
-            slide_mode = SLIDE_NONE;
-            slide_phase = SP_NONE; // complete sliding
-
-            arc_target_angle = slide_origin_heading; // restore straight reference
-            htim12.Instance->CCR2 = servo;           // normal correction resumes
-
-            if (completed_slide == SLIDE_RIGHT)
-            {
-              set_servo_center_afterright();
-            }
-
-
-            if (completed_slide == SLIDE_LEFT)
-            {
-              set_servo_center_afterleft();
-            }
-            // braking logic, exit command
-            motor_brake();
-            obstacle_stop_mode = OBST_MODE_NONE; // clear mode
-            i_acc = 0;
-            prev_err = 0; // reset PID state
-            uart_cmd = CMD_NONE;
-            next_start_tick = HAL_GetTick() + INTER_CMD_MS;
-            //
-          }
-
-          //				} else if (slide_phase == SP_RECENTER){
-          //					//do like the first phase
-          //					htim12.Instance->CCR2 = (slide_mode == SLIDE_RIGHT) ? SERVO_SLIDERIGHT_CCR : SERVO_SLIDELEFT_CCR;
-          //
-          //					if (slide_mode == SLIDE_RIGHT) {
-          //						// Right slide -> steer right, so LEFT is outer, RIGHT is inner
-          //						int outer = (int)(SLIDE_OUTER_PWM);
-          //						int inner = (int)(SLIDE_INNER_PWM);
-          //						left_forward_duty(outer);
-          //						right_forward_duty(inner);
-          //					} else { // SLIDE_LEFT
-          //						// Left slide -> steer left, so RIGHT is outer, LEFT is inner
-          //						int outer = (int)(SLIDE_OUTER_PWM);
-          //						int inner = (int)(SLIDE_INNER_PWM);
-          //						right_forward_duty(outer);
-          //						left_forward_duty(inner);
-          //					   }
-          //					if ((slide_mode == SLIDE_RIGHT && total_angle <= arc_target_angle) ||
-          //						(slide_mode == SLIDE_LEFT  && total_angle >= arc_target_angle)) {
-          //							slide_mode = SLIDE_NONE;
-          //							slide_phase = SP_NONE;   // complete sliding
-          //
-          //							arc_target_angle = slide_origin_heading;   // restore straight reference
-          //							htim12.Instance->CCR2 = servo;             // normal correction resumes
-          //
-          //							//braking logic, exit command
-          //							motor_brake();
-          //							obstacle_stop_mode = OBST_MODE_NONE;   // clear mode
-          //							i_acc = 0; prev_err = 0;               // reset PID state
-          //							uart_cmd = CMD_NONE;
-          //							next_start_tick = HAL_GetTick() + INTER_CMD_MS;
-          //						}
-        }
-        else
-        {
-          // safety fallback
-          htim12.Instance->CCR2 = servo;
-        }
-      }
-      else
-      { // no servoslide mode
-        // no slide: normal straight correction
-        htim12.Instance->CCR2 = servo;
-    	//htim12.Instance->CCR2 = SERVO_CENTER_CCR; luther
-
-      }
-
-      //			htim12.Instance->CCR2 = servo;
-
-      if (uart_cmd == CMD_FORWARD && slide_mode == SLIDE_NONE)
-      {
-        // Left motor (TIM4: CH3=IN2, CH4=IN1)
-        __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, lDuty);
-        __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, PWM_MAX);
-        // Right motor (TIM9: CH1=IN2, CH2=IN1)
-      //  __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_1, rDuty * 0.94); // 0.930
-        __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_1, rDuty); //test
-
-        __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_2, PWM_MAX);
-      }
-      else if (uart_cmd == CMD_REVERSE)
-      { // CMD_REVERSE
-        __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, PWM_MAX);
-        __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, lDuty);
-        __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_1, PWM_MAX);
-       // __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_2, rDuty * 1.025); // 0.940
-        __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_2, rDuty); // test
-
-      }
-
-      break;
-    }
-
-    // luther turn start
-    case CMD_ARC_RIGHT:
-    case CMD_ARC_LEFT:
-    case CMD_ARC_RIGHT_REV:
-    case CMD_ARC_LEFT_REV:
-    {
-      const int command = (int)uart_cmd;
-      const uint32_t now = HAL_GetTick();
-
-      /* Safety: a lifted/stalled robot has no yaw feedback and must not run forever. */
-      if (turn_timeout_tick != 0U &&
-          (int32_t)(now - turn_timeout_tick) >= 0)
-      {
-        motor_brake();
-        Telemetry_RecordFault("TURN_TIMEOUT");
-        abort_now = 1U;
-        break;
-      }
-
-      /* Let the steering servo reach its requested angle before driving. */
-      if (turn_motor_enable_tick != 0U &&
-          (int32_t)(now - turn_motor_enable_tick) < 0)
-      {
-        motor_brake();
-        turn_effort_cmd = 0.0f;
-        turn_left_pwm = PWM_MAX;
-        turn_right_pwm = PWM_MAX;
-        break;
-      }
-      turn_motor_enable_tick = 0U;
-
-      if (turn_control_phase == TURN_CTRL_IDLE)
-        reset_turn_controller();
-
-      const float direction = turn_yaw_direction(command);
-      const float signed_error = arc_target_angle - total_angle;
-      const float remaining = direction * signed_error;
-      const float closing_rate = direction * gyro_yaw_rate_dps;
-
-      turn_error_deg = signed_error;
-
-      /*
-       * After braking, wait for mechanical motion to stop before deciding
-       * whether the command is complete or needs one gentle re-approach.
-       */
-      if (turn_control_phase == TURN_CTRL_SETTLE)
-      {
-        motor_brake();
-        turn_effort_cmd = 0.0f;
-        turn_left_pwm = PWM_MAX;
-        turn_right_pwm = PWM_MAX;
-
-        if ((int32_t)(now - turn_settle_until_tick) < 0)
-          break;
-
-        if (fabsf(signed_error) <= TURN_FINISH_TOL_DEG ||
-            remaining <= 0.0f ||
-            turn_approach_count >= TURN_MAX_APPROACHES)
-        {
-          finish_turn_command(command);
-          break;
-        }
-
-        /* Stopped short: restore steering and make a slower approach. */
-        turn_approach_count++;
-        turn_i_error_deg_s = 0.0f;
-        turn_pid_last_tick = now;
-        turn_control_phase = TURN_CTRL_DRIVE;
-        set_turn_servo_for_command(command);
-        turn_motor_enable_tick = now + TURN_RETRY_SERVO_MS;
-        break;
-      }
-
-      /*
-       * Predict motion during sensing + braking delay. At 100 deg/s and
-       * 45 ms look-ahead this begins braking about 4.5 degrees early.
-       */
-      const float positive_closing_rate = (closing_rate > 0.0f) ? closing_rate : 0.0f;
-      const float brake_margin = TURN_FINISH_TOL_DEG +
-                                 TURN_BRAKE_LOOKAHEAD_S * positive_closing_rate;
-
-      if (remaining <= brake_margin)
-      {
-        motor_brake();
-        center_servo_after_turn(command);
-        turn_effort_cmd = 0.0f;
-        turn_left_pwm = PWM_MAX;
-        turn_right_pwm = PWM_MAX;
-        turn_control_phase = TURN_CTRL_SETTLE;
-        turn_settle_until_tick = now + TURN_SETTLE_MS;
-        break;
-      }
-
-      float dt_s = (float)(now - turn_pid_last_tick) * 0.001f;
-      if (dt_s < 0.001f)
-        dt_s = 0.001f;
-      if (dt_s > 0.050f)
-        dt_s = 0.050f;
-      turn_pid_last_tick = now;
-
-      float candidate_i = turn_i_error_deg_s + remaining * dt_s;
-      if (candidate_i > TURN_I_LIMIT_DEG_S)
-        candidate_i = TURN_I_LIMIT_DEG_S;
-      if (candidate_i < -TURN_I_LIMIT_DEG_S)
-        candidate_i = -TURN_I_LIMIT_DEG_S;
-
-      float effort = TURN_KP_EFFORT_PER_DEG * remaining +
-                     TURN_KI_EFFORT_PER_DEG_S * candidate_i -
-                     TURN_KD_EFFORT_PER_DPS * closing_rate;
-
-      /* Conditional integration prevents wind-up while output is saturated. */
-      if (effort < TURN_OUTER_EFFORT_MAX)
-        turn_i_error_deg_s = candidate_i;
-
-      if (effort > TURN_OUTER_EFFORT_MAX)
-        effort = TURN_OUTER_EFFORT_MAX;
-      if (effort < TURN_OUTER_EFFORT_MIN)
-        effort = TURN_OUTER_EFFORT_MIN;
-
-      const float inner_ratio = is_right_steer_turn(command)
-                                  ? TURN_INNER_EFFORT_RATIO_R
-                                  : TURN_INNER_EFFORT_RATIO_L;
-
-      const int outer_pwm = pwm_compare_from_effort(effort);
-      const int inner_pwm = pwm_compare_from_effort(effort * inner_ratio);
-
-      turn_effort_cmd = effort;
-      drive_turn_wheels(command, outer_pwm, inner_pwm);
-      break;
-    } // luther turn end
-
-    case CMD_STOP:
-      motor_brake();
-      uart_cmd = CMD_NONE;
-      next_start_tick = HAL_GetTick() + SLIDE_CMD_MS;
-
-      break;
-
-    case CMD_NONE:
-    default:
-    {
-      if (!cmdq_empty())
-      {
-        if (HAL_GetTick() >= next_start_tick)
-        {
-          if (!start_next_from_queue())
-          {
-            // queue emptied right here -> ACK script finished
-            //		                send_ack();
-          }
-        }
-      }
-      else
-      {
-        // idle with empty queue: make sure next_start_tick doesn’t block future scripts
-        next_start_tick = 0;
-      }
-      break;
-    }
-    }
-    osDelay(5);
-  }
-  /* USER CODE END motorTask */
+	  }
+	  else
+	  {
+		dist_accum_a += (int16_t)(now_a - dist_last_a);
+		dist_accum_b += -(int16_t)(now_b - dist_last_b);
+		dist_last_a = now_a;
+		dist_last_b = now_b;
+	  }
+
+	  uint32_t profile_dt_ms = profile_now - drive_profile_last_tick;
+
+	  drive_profile_last_tick = profile_now;
+
+	  /* Prevent an unusual task delay from making one giant ramp step. luther */
+	  if (profile_dt_ms > 50U)
+	  {
+		  profile_dt_ms = 50U;
+	  }
+
+	  int32_t avg_moved = (dist_accum_a + dist_accum_b) / 2;
+
+	  // Remaining distance in encoder counts. Keep it positive regardless of FWD/REV direction. luther
+	  int32_t remaining_counts;
+
+	  if (commanded_direction > 0)
+	  {
+		  remaining_counts = target_counts - avg_moved;
+	  }
+	  else
+	  {
+		  remaining_counts = avg_moved - target_counts;
+	  }
+
+	  if (remaining_counts < 0)
+	  {
+		  remaining_counts = 0;
+	  }
+
+	  // ====== Stop conditions ======
+	  bool done_by_counts = false;
+	  if (target_counts >= 0)
+	  {
+		done_by_counts = (avg_moved >= target_counts);
+	  }
+	  else
+	  {
+		done_by_counts = (avg_moved <= target_counts);
+	  }
+
+	  bool done_by_obst = false;
+	  if (uart_cmd == CMD_FORWARD && obstacle_stop_mode != OBST_MODE_NONE)
+	  {
+		switch (obstacle_stop_mode)
+		{
+
+		case OBST_MODE_US_T:
+		  // Stop condition for FUxx: ultrasound <= per-move threshold
+		  done_by_obst = (echo_debug <= us_stop_cm);
+
+		  // If extremely close, reverse only if allowed (FU), otherwise just stop (FX)
+		  if (echo_debug <= OBSTACLE_REV_CM && us_allow_reverse)
+		  {
+
+			// Optional: send an immediate “collision-close” marker (like your US mode)
+			if (!uart3_tx_busy)
+			{
+			  char us_msg[32];
+			  int n = snprintf(us_msg, sizeof(us_msg), "us0.0,%d\n", (int)echo_debug);
+			  uart3_tx_busy = 1;
+			  HAL_UART_Transmit_IT(&huart3, (uint8_t *)us_msg, (uint16_t)n);
+			}
+
+			// Keep heading straight; hand over to reverse controller
+			target_angle = arc_target_angle;
+			set_servo_center();
+
+			obstacle_stop_mode = OBST_MODE_US_BACK; // reuse your existing reverse-clear mode
+			target_counts = INT32_MIN + 1;          // sentinel: counts won’t finish it
+
+			// Clean PID handover
+			i_acc = 0;
+			prev_err = 0;
+
+			done_by_obst = false; // we’re not finishing here; switching to REVERSE
+			seg_rebase = 1;
+			uart_cmd = CMD_REVERSE;
+		  }
+		  break;
+
+		case OBST_MODE_US:
+		  // ultrasound: stop when we are closer than threshold
+		  done_by_obst = (echo_debug <= OBSTACLE_STOP_CM);
+		  // reverse
+
+		  if (echo_debug <= OBSTACLE_REV_CM)
+		  { // reverse bump
+
+			if (!uart3_tx_busy)
+			{
+			  char us_msg[32];
+			  int n = snprintf(us_msg, sizeof(us_msg), "us0.0,%d\n",
+							   (int)echo_debug);
+			  uart3_tx_busy = 1;
+			  HAL_UART_Transmit_IT(&huart3, (uint8_t *)us_msg, (uint16_t)n);
+			}
+
+			// Keep heading straight
+			target_angle = arc_target_angle;
+			set_servo_center();
+
+			// --- switch to reverse-until-clear mode ---
+			//						  odom_counts_run = 0;                  // track how far we reverse
+			obstacle_stop_mode = OBST_MODE_US_BACK;
+			target_counts = INT32_MIN + 1; // sentinel so counts never end us
+
+			// Clean PID handover
+			i_acc = 0;
+			prev_err = 0;
+
+			done_by_obst = false;
+			seg_rebase = 1; // <--- rebase on entry
+			uart_cmd = CMD_REVERSE;
+		  }
+		  break;
+		case OBST_MODE_IR_RIGHT:
+		  // FIR semantics: keep moving UNTIL right-IR says "no obstacle" (0)
+		  // -> stop when ir1_obs == 0
+		  done_by_obst = (ir1_obs == 0); // PC1
+		  break;
+		case OBST_MODE_IR_LEFT:
+		  done_by_obst = (ir0_obs == 0); // PC0
+		  break;
+
+		case OBST_MODE_IR_RIGHT_O: // NEW firo (stop when obstacle IS present)
+		  done_by_obst = (ir1_obs == 1);
+		  break;
+
+		case OBST_MODE_IR_LEFT_O: // NEW filo (stop when obstacle IS present)
+		  done_by_obst = (ir0_obs == 1);
+		  break;
+		default:
+		  break;
+		}
+	  }
+
+	  if (uart_cmd == CMD_REVERSE && obstacle_stop_mode == OBST_MODE_US_BACK)
+	  {
+		done_by_obst = (echo_debug >= US_BACK_CLEAR_CM);
+	  }
+
+	  // transmit US distance travelled and detected
+	  if (done_by_obst && (obstacle_stop_mode == OBST_MODE_US || obstacle_stop_mode == OBST_MODE_US_T))
+	  {
+		odom_cm_run = (float)odom_counts_run / COUNTS_PER_CM;
+
+		if (!uart3_tx_busy)
+		{
+		  char us_msg[32];
+		  int n = snprintf(us_msg, sizeof(us_msg), "us%.1f,%d\n",
+						   (double)odom_cm_run, (int)echo_debug);
+		  uart3_tx_busy = 1;
+		  HAL_UART_Transmit_IT(&huart3, (uint8_t *)us_msg, (uint16_t)n);
+		}
+	  }
+
+	  // transmit IR distance travelled
+	  if (done_by_obst && (obstacle_stop_mode == OBST_MODE_IR_RIGHT || obstacle_stop_mode == OBST_MODE_IR_LEFT))
+	  {
+		odom_cm_run_ir = (float)odom_counts_run_ir / COUNTS_PER_CM;
+
+		if (!uart3_tx_busy)
+		{
+		  char ir_msg[32];
+		  int n = snprintf(ir_msg, sizeof(ir_msg), "ir%.1f\n", (double)odom_cm_run_ir);
+		  uart3_tx_busy = 1;
+		  HAL_UART_Transmit_IT(&huart3, (uint8_t *)ir_msg, (uint16_t)n);
+		}
+	  }
+
+	  if (done_by_counts || done_by_obst)
+	  {
+		motor_brake();
+		obstacle_stop_mode = OBST_MODE_NONE; // clear mode
+		i_acc = 0;
+		prev_err = 0; // reset PID state
+		// send_ack_one_cmd();    // commented out (RYAN TOLD TO)
+		uart_cmd = CMD_NONE;
+		next_start_tick = HAL_GetTick() + INTER_CMD_MS;
+		break;
+	  }
+
+	  // ====== Wheel speeds (counts per second) @ ~10 ms ======
+	  static uint16_t last_a = 0, last_b = 0;
+	  static uint32_t last_t = 0;
+	  uint32_t t = HAL_GetTick();
+
+	  if (last_t == 0)
+	  {
+		last_t = t;
+		last_a = now_a;
+		last_b = now_b;
+	  }
+
+	  // If a new segment just started, rebase baselines and skip this tick’s accumulation
+	  if (seg_rebase)
+	  {
+		last_a = now_a;
+		last_b = now_b;
+		last_t = t;
+		seg_rebase = 0;
+		cpsA_f = 0.0f;
+		cpsB_f = 0.0f;
+
+
+		// optional: also clear PID transients to avoid a kick
+		i_acc = 0;
+		prev_err = 0;
+
+		// Do NOT compute da/db or update odometers this tick
+	  }
+
+	  int16_t da = (int16_t)(now_a - last_a);
+	  int16_t db = (int16_t)(now_b - last_b);
+	  db = -db; // keep right reversed consistently
+
+	  // record distance travelled during US/FIR/FIL movement
+	  if (uart_cmd == CMD_FORWARD && (obstacle_stop_mode == OBST_MODE_US || obstacle_stop_mode == OBST_MODE_US_T))
+	  {
+		int32_t inc_counts = ((int32_t)da + (int32_t)db) / 2;
+		odom_counts_run += inc_counts;
+	  }
+
+	  if (uart_cmd == CMD_FORWARD && (obstacle_stop_mode == OBST_MODE_IR_RIGHT || obstacle_stop_mode == OBST_MODE_IR_LEFT))
+	  {
+		int32_t inc_counts = ((int32_t)da + (int32_t)db) / 2;
+		odom_counts_run_ir += inc_counts;
+	  }
+
+	  uint32_t dt_ms = (t - last_t);
+	  if (dt_ms == 0)
+		dt_ms = 1;
+
+	  int32_t cpsA = (int32_t)da * 1000 / (int32_t)dt_ms;
+	  int32_t cpsB = (int32_t)db * 1000 / (int32_t)dt_ms;
+
+	  // ---- Low-pass filter for PID feedback ----
+	  //static float cpsA_f = 0.0f, cpsB_f = 0.0f; // filtered cps
+	  float dt_s = (float)dt_ms / 1000.0f;
+	  float alpha = dt_s / (SPEED_LPF_TAU + dt_s); // 0<alpha<1, automatic with your dt
+
+	  cpsA_f += alpha * ((float)cpsA - cpsA_f);
+	  cpsB_f += alpha * ((float)cpsB - cpsB_f);
+
+	  last_a = now_a;
+	  last_b = now_b;
+	  last_t = t;
+
+	  //          // ====== Plain PID on speed difference ===== // SOMETHING WRONG HERE?
+	  //          int32_t err = (int32_t)(cpsA_f - cpsB_f); //filtered values
+	  ////          int32_t err = (cpsA - cpsB);
+
+	  // ====== Plain PID on speed difference WITH GYRO FEEDBACK =====
+	  // Speed-based error (motor balance)
+	  int32_t speed_err = (int32_t)(cpsA_f - cpsB_f); // filtered values
+
+	  // Calculate heading error BEFORE using it for gyro feedback
+	  error_angle = target_angle - total_angle;
+
+	  /* Wheel PI balances encoder speeds. Heading is corrected by the servo
+	   * below. Feeding yaw into both loops makes them fight each other. */
+	  int32_t err = speed_err;
+
+	  i_acc += err;
+	  const int32_t IACC_CLAMP = 25000;
+	  if (i_acc > IACC_CLAMP)
+		i_acc = IACC_CLAMP;
+	  if (i_acc < -IACC_CLAMP)
+		i_acc = -IACC_CLAMP;
+
+	  int32_t d = err - prev_err;
+	  prev_err = err;
+
+	  float off_f = Kp * (float)err + Ki * (float)i_acc + Kd * (float)d;
+	  int off = (int)off_f;
+	  //int off = 0;
+
+	  /*
+	   * Select the same calibrated full-speed compare used by scripted F/R.
+	   * In manual straight mode, throttle only interpolates from brake/zero
+	   * drive (PWM_MAX) to that already-calibrated full-speed point. At 100%
+	   * the values are exactly the same as a normal scripted F/R command.
+	   */
+	  //start new acceleration luther
+	  const bool is_reverse = (uart_cmd == CMD_REVERSE);
+
+	  const bool manual_straight =
+		  manual_control.owns_motors &&
+		  manual_motion_kind == MANUAL_MOTION_STRAIGHT;
+
+	  /*
+	   * Requested level before applying the scripted acceleration/deceleration
+	   * profile.
+	   */
+	  float requested_percent = manual_straight ? (float)manual_throttle_percent : 100.0f;
+
+	  /*
+	   * Apply the automatic motion profile only to normal finite F/R commands.
+	   *
+	   * Emergency/obstacle/manual stops should retain their immediate safety
+	   * behaviour.
+	   */
+	  const bool finite_scripted_move =
+		  !manual_straight &&
+		  obstacle_stop_mode == OBST_MODE_NONE &&
+		  target_counts != INT32_MAX &&
+		  target_counts != (INT32_MIN + 1);
+
+	  float profile_target = requested_percent;
+
+	  if (finite_scripted_move)
+	  {
+		  /*
+		   * Planned deceleration during the last STRAIGHT_DECEL_CM.
+		   */
+		  const float decel_counts =
+			  STRAIGHT_DECEL_CM * COUNTS_PER_CM;
+
+		  if ((float)remaining_counts < decel_counts)
+		  {
+			  float remaining_fraction =
+				  (float)remaining_counts / decel_counts;
+
+			  if (remaining_fraction < 0.0f)
+				  remaining_fraction = 0.0f;
+
+			  if (remaining_fraction > 1.0f)
+				  remaining_fraction = 1.0f;
+
+			  /*
+			   * 100% at start of deceleration zone,
+			   * DECEL_MIN_PERCENT at the target.
+			   */
+			  float decel_percent =
+				  STRAIGHT_DECEL_MIN_PERCENT +
+				  (100.0f - STRAIGHT_DECEL_MIN_PERCENT) *
+				  remaining_fraction;
+
+			  if (decel_percent < profile_target)
+			  {
+				  profile_target = decel_percent;
+			  }
+		  }
+
+		  /*
+		   * Acceleration slew:
+		   *
+		   * 0 -> 100% over STRAIGHT_ACCEL_RAMP_MS.
+		   */
+		  float accel_step =
+			  100.0f *
+			  (float)profile_dt_ms /
+			  (float)STRAIGHT_ACCEL_RAMP_MS;
+
+		  if (drive_profile_percent < profile_target)
+		  {
+			  drive_profile_percent += accel_step;
+
+			  if (drive_profile_percent > profile_target)
+			  {
+				  drive_profile_percent = profile_target;
+			  }
+		  }
+		  else
+		  {
+			  /*
+			   * Deceleration target moves gradually as remaining distance
+			   * decreases, so follow it directly.
+			   */
+			  drive_profile_percent = profile_target;
+		  }
+	  }
+	  else
+	  {
+		  /*
+		   * Manual/obstacle modes keep existing behaviour for now.
+		   */
+		  drive_profile_percent = requested_percent;
+	  }
+
+	  if (drive_profile_percent < 0.0f)
+		  drive_profile_percent = 0.0f;
+
+	  if (drive_profile_percent > 100.0f)
+		  drive_profile_percent = 100.0f;
+
+	  const int throttle_percent =
+		  (int)(drive_profile_percent + 0.5f);
+	  //end new acceleration luther
+
+	  const float left_compare_scale =
+		  is_reverse ? REV_LEFT_COMPARE_SCALE : FWD_LEFT_COMPARE_SCALE;
+	  const float right_compare_scale =
+		  is_reverse ? REV_RIGHT_COMPARE_SCALE : FWD_RIGHT_COMPARE_SCALE;
+
+	  const int full_base_L = clamp_pwm_compare(
+		  (int)((float)PWM_RUN * left_compare_scale + 0.5f));
+	  const int full_base_R = clamp_pwm_compare(
+		  (int)((float)PWM_RUN * right_compare_scale + 0.5f));
+
+	  int base_L = PWM_MAX -
+		  ((PWM_MAX - full_base_L) * throttle_percent) / 100;
+	  int base_R = PWM_MAX -
+		  ((PWM_MAX - full_base_R) * throttle_percent) / 100;
+
+	  // Scale wheel-speed PI correction with the actual drive profile.
+	  if (throttle_percent < 100)
+		  off = (off * throttle_percent) / 100;
+
+	  int lDuty;
+	  int rDuty;
+
+	  if (!is_reverse)
+	  {
+		  /*
+		   * Larger compare = less power.
+		   * Positive off slows left and speeds up right.
+		   */
+		  lDuty = base_L + off;
+		  rDuty = base_R - off;
+	  }
+	  else
+	  {
+		  /*
+		   * Encoder speeds are negative in reverse, so the correction
+		   * direction must be inverted.
+		   */
+		  lDuty = base_L - off;
+		  rDuty = base_R + off;
+	  }
+
+	  lDuty = clamp_pwm_compare(lDuty);
+	  rDuty = clamp_pwm_compare(rDuty);
+
+	  /* Save actual straight motor controller outputs for telemetry. */
+	  straight_left_pwm = lDuty;
+	  straight_right_pwm = rDuty;
+
+	  // Hold the heading captured at the start of THIS straight segment.
+	  error_angle = target_angle - total_angle;
+
+	  /* =========================================================
+	   * Straight-line gyro heading correction
+	   * ========================================================= */
+
+	  float steering_error = error_angle;
+
+	  /* Ignore tiny gyro noise. */
+	  if (fabsf(steering_error) < STRAIGHT_STEER_DEADBAND_DEG)
+	  {
+		  steering_error = 0.0f;
+	  }
+
+	  /*
+	   * First calculate controller output as a percentage of
+	   * available steering travel rather than raw CCR counts.
+	   */
+	  float correction_percent =
+		  STRAIGHT_STEER_KP_PERCENT_PER_DEG * steering_error;
+
+	  /*
+	   * Once outside the deadband, make sure the servo moves enough
+	   * to overcome linkage/servo dead travel.
+	   */
+	  if (steering_error != 0.0f &&
+		  fabsf(correction_percent) < STRAIGHT_STEER_MIN_PERCENT)
+	  {
+		  correction_percent =
+			  (correction_percent > 0.0f)
+				  ? STRAIGHT_STEER_MIN_PERCENT
+				  : -STRAIGHT_STEER_MIN_PERCENT;
+	  }
+
+	  /* Limit heading correction. */
+	  if (correction_percent > STRAIGHT_STEER_MAX_PERCENT)
+	  {
+		  correction_percent = STRAIGHT_STEER_MAX_PERCENT;
+	  }
+	  else if (correction_percent < -STRAIGHT_STEER_MAX_PERCENT)
+	  {
+		  correction_percent = -STRAIGHT_STEER_MAX_PERCENT;
+	  }
+
+	  /*
+	   * Convert yaw correction into physical steering direction.
+	   *
+	   * Positive physical_steer_percent = RIGHT
+	   * Negative physical_steer_percent = LEFT
+	   *
+	   * Reverse requires the steering correction direction to flip.
+	   */
+	  float physical_steer_percent;
+
+	  if (uart_cmd == CMD_FORWARD)
+	  {
+		  physical_steer_percent = -correction_percent;
+	  }
+	  else
+	  {
+		  physical_steer_percent = correction_percent;
+	  }
+
+	  /* Use the current calibrated centre. */
+	  int center = (int)current_center_ccr;
+
+	  /*
+	   * Use the appropriate steering endpoints for the direction
+	   * of travel.
+	   */
+	  int left_limit;
+	  int right_limit;
+
+	  if (uart_cmd == CMD_REVERSE)
+	  {
+		  left_limit = SERVO_REVERSE_LEFT_CCR;
+		  right_limit = SERVO_REVERSE_RIGHT_CCR;
+	  }
+	  else
+	  {
+		  left_limit = SERVO_LEFT_CCR;
+		  right_limit = SERVO_RIGHT_CCR;
+	  }
+
+	  int servo = center;
+
+	  if (physical_steer_percent > 0.0f)
+	  {
+		  /* RIGHT steering */
+		  float available = (float)(right_limit - center);
+
+		  servo = center +
+			  (int)lroundf(
+				  available *
+				  physical_steer_percent /
+				  100.0f
+			  );
+	  }
+	  else if (physical_steer_percent < 0.0f)
+	  {
+		  /* LEFT steering */
+		  float available = (float)(center - left_limit);
+
+		  servo = center +
+			  (int)lroundf(
+				  available *
+				  physical_steer_percent /
+				  100.0f
+			  );
+	  }
+
+	  /* Final mechanical safety clamp. */
+	  if (servo < left_limit)
+	  {
+		  servo = left_limit;
+	  }
+
+	  if (servo > right_limit)
+	  {
+		  servo = right_limit;
+	  }
+
+	  /* Save controller state for telemetry. */
+	  straight_servo_center_ccr = center;
+	  straight_steer_percent = physical_steer_percent;
+	  straight_servo_ccr = servo;
+
+	  // add sliding right
+	  // === Slide state machine overrides servo while active ===
+	  if (slide_mode != SLIDE_NONE)
+	  {
+
+		if (slide_phase == SP_TURN_OUT)
+		{
+		  // steer toward target side until reaching ±45° from origin
+		  htim12.Instance->CCR2 = (slide_mode == SLIDE_RIGHT) ? SERVO_SLIDERIGHT_CCR : SERVO_SLIDELEFT_CCR;
+
+		  if (slide_mode == SLIDE_RIGHT)
+		  {
+			// Right slide -> steer right, so LEFT is outer, RIGHT is inner
+			int outer = (int)(SLIDE_OUTER_PWM);
+			int inner = (int)(SLIDE_INNER_PWM);
+			left_forward_duty(outer);
+			right_forward_duty(inner);
+		  }
+		  else
+		  { // SLIDE_LEFT
+			// Left slide -> steer left, so RIGHT is outer, LEFT is inner
+			int outer = (int)(SLIDE_OUTER_PWM);
+			int inner = (int)(SLIDE_INNER_PWM);
+			right_forward_duty(outer);
+			left_forward_duty(inner);
+		  }
+		  if ((slide_mode == SLIDE_RIGHT && total_angle <= arc_target_angle) ||
+			  (slide_mode == SLIDE_LEFT && total_angle >= arc_target_angle))
+		  {
+			slide_phase = SP_TURN_IN; // start coming back
+		  }
+		}
+		else if (slide_phase == SP_TURN_IN)
+		{
+		  // steer opposite side until we’re back at original heading (within tolerance)
+		  htim12.Instance->CCR2 = (slide_mode == SLIDE_RIGHT) ? SERVO_SLIDELEFT_CCR : SERVO_SLIDERIGHT_CCR;
+
+		  if (slide_mode == SLIDE_RIGHT)
+		  {
+			// Coming back from right -> steer left, so RIGHT is outer now
+			int outer = (int)(SLIDE_OUTER_PWM);
+			int inner = (int)(SLIDE_INNER_PWM);
+			right_forward_duty(outer);
+			left_forward_duty(inner);
+		  }
+		  else
+		  { // SLIDE_LEFT
+			// Coming back from left -> steer right, so LEFT is outer now
+			int outer = (int)(SLIDE_OUTER_PWM);
+			int inner = (int)(SLIDE_INNER_PWM);
+			left_forward_duty(outer);
+			right_forward_duty(inner);
+		  }
+		  arc_target_angle = slide_origin_heading;
+
+		  if ((slide_mode == SLIDE_RIGHT && total_angle >= arc_target_angle - 5.0) || // slide_return_heading
+			  (slide_mode == SLIDE_LEFT && total_angle <= arc_target_angle + 5.0))
+		  {
+			const slide_t completed_slide = slide_mode;
+			// done: hand back to your normal straight-line hold
+			//						slide_phase = SP_RECENTER;
+			slide_mode = SLIDE_NONE;
+			slide_phase = SP_NONE; // complete sliding
+
+			arc_target_angle = slide_origin_heading; // restore straight reference
+			htim12.Instance->CCR2 = servo;           // normal correction resumes
+
+			if (completed_slide == SLIDE_RIGHT)
+			{
+			  set_servo_center_afterright();
+			}
+
+
+			if (completed_slide == SLIDE_LEFT)
+			{
+			  set_servo_center_afterleft();
+			}
+			// braking logic, exit command
+			motor_brake();
+			obstacle_stop_mode = OBST_MODE_NONE; // clear mode
+			i_acc = 0;
+			prev_err = 0; // reset PID state
+			uart_cmd = CMD_NONE;
+			next_start_tick = HAL_GetTick() + INTER_CMD_MS;
+			//
+		  }
+
+		  //				} else if (slide_phase == SP_RECENTER){
+		  //					//do like the first phase
+		  //					htim12.Instance->CCR2 = (slide_mode == SLIDE_RIGHT) ? SERVO_SLIDERIGHT_CCR : SERVO_SLIDELEFT_CCR;
+		  //
+		  //					if (slide_mode == SLIDE_RIGHT) {
+		  //						// Right slide -> steer right, so LEFT is outer, RIGHT is inner
+		  //						int outer = (int)(SLIDE_OUTER_PWM);
+		  //						int inner = (int)(SLIDE_INNER_PWM);
+		  //						left_forward_duty(outer);
+		  //						right_forward_duty(inner);
+		  //					} else { // SLIDE_LEFT
+		  //						// Left slide -> steer left, so RIGHT is outer, LEFT is inner
+		  //						int outer = (int)(SLIDE_OUTER_PWM);
+		  //						int inner = (int)(SLIDE_INNER_PWM);
+		  //						right_forward_duty(outer);
+		  //						left_forward_duty(inner);
+		  //					   }
+		  //					if ((slide_mode == SLIDE_RIGHT && total_angle <= arc_target_angle) ||
+		  //						(slide_mode == SLIDE_LEFT  && total_angle >= arc_target_angle)) {
+		  //							slide_mode = SLIDE_NONE;
+		  //							slide_phase = SP_NONE;   // complete sliding
+		  //
+		  //							arc_target_angle = slide_origin_heading;   // restore straight reference
+		  //							htim12.Instance->CCR2 = servo;             // normal correction resumes
+		  //
+		  //							//braking logic, exit command
+		  //							motor_brake();
+		  //							obstacle_stop_mode = OBST_MODE_NONE;   // clear mode
+		  //							i_acc = 0; prev_err = 0;               // reset PID state
+		  //							uart_cmd = CMD_NONE;
+		  //							next_start_tick = HAL_GetTick() + INTER_CMD_MS;
+		  //						}
+		}
+		else
+		{
+		  // safety fallback
+		  htim12.Instance->CCR2 = servo;
+		}
+	  }
+	  else
+	  { // no servoslide mode
+		// no slide: normal straight correction
+		htim12.Instance->CCR2 = servo;
+		//htim12.Instance->CCR2 = SERVO_CENTER_CCR; luther
+
+	  }
+
+	  //			htim12.Instance->CCR2 = servo;
+
+	  if (uart_cmd == CMD_FORWARD && slide_mode == SLIDE_NONE)
+	  {
+		// Left motor (TIM4: CH3=IN2, CH4=IN1)
+		__HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, lDuty);
+		__HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, PWM_MAX);
+		// Right motor (TIM9: CH1=IN2, CH2=IN1)
+	  //  __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_1, rDuty * 0.94); // 0.930
+		__HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_1, rDuty); //test
+
+		__HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_2, PWM_MAX);
+	  }
+	  else if (uart_cmd == CMD_REVERSE)
+	  { // CMD_REVERSE
+		__HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, PWM_MAX);
+		__HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, lDuty);
+		__HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_1, PWM_MAX);
+	   // __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_2, rDuty * 1.025); // 0.940
+		__HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_2, rDuty); // test
+
+	  }
+
+	  break;
+	}
+
+	// luther turn start
+	case CMD_ARC_RIGHT:
+	case CMD_ARC_LEFT:
+	case CMD_ARC_RIGHT_REV:
+	case CMD_ARC_LEFT_REV:
+	{
+
+		const int command = (int)uart_cmd;
+		const uint32_t now = HAL_GetTick();
+
+		#if TURN_SERVO_ONLY_TEST
+
+			left_coast();
+			right_coast();
+
+			if (turn_motor_enable_tick == 0U)
+			{
+				set_turn_servo_for_command(command);
+
+				turn_motor_enable_tick =
+					now + TURN_SERVO_TEST_HOLD_MS;
+
+				break;
+			}
+
+			if ((int32_t)(now - turn_motor_enable_tick) < 0)
+			{
+				left_coast();
+				right_coast();
+				break;
+			}
+
+			center_servo_after_turn(command);
+
+			left_coast();
+			right_coast();
+
+			stop_turn_controller();
+
+			target_angle = total_angle;
+			turn_motor_enable_tick = 0U;
+			arc_postforward_cm = 0U;
+
+			uart_cmd = CMD_NONE;
+			next_start_tick = HAL_GetTick() + INTER_CMD_MS;
+
+			break;
+
+		#endif
+
+		/* Safety: a lifted/stalled robot has no yaw feedback and must not run forever. */
+		if (turn_timeout_tick != 0U &&
+		  (int32_t)(now - turn_timeout_tick) >= 0)
+		{
+			motor_brake();
+			Telemetry_RecordFault("TURN_TIMEOUT");
+			abort_now = 1U;
+			break;
+		}
+
+		/* Let the steering servo reach its requested angle before driving. */
+		if (turn_motor_enable_tick != 0U &&
+		  (int32_t)(now - turn_motor_enable_tick) < 0)
+		{
+			motor_brake();
+			turn_effort_cmd = 0.0f;
+			turn_left_pwm = PWM_MAX;
+			turn_right_pwm = PWM_MAX;
+			break;
+		}
+		turn_motor_enable_tick = 0U;
+
+		if (turn_control_phase == TURN_CTRL_IDLE)
+			reset_turn_controller();
+
+		const float direction = turn_yaw_direction(command);
+		const float signed_error = arc_target_angle - total_angle;
+		const float remaining = direction * signed_error;
+		const float closing_rate = direction * gyro_yaw_rate_dps;
+
+		turn_error_deg = signed_error;
+
+		/*
+		* After braking, wait for mechanical motion to stop before deciding
+		* whether the command is complete or needs one gentle re-approach.
+		*/
+		if (turn_control_phase == TURN_CTRL_SETTLE)
+		{
+			motor_brake();
+			turn_effort_cmd = 0.0f;
+			turn_left_pwm = PWM_MAX;
+			turn_right_pwm = PWM_MAX;
+
+			if ((int32_t)(now - turn_settle_until_tick) < 0)
+				break;
+
+			if (fabsf(signed_error) <= TURN_FINISH_TOL_DEG || remaining <= 0.0f || turn_approach_count >= TURN_MAX_APPROACHES)
+			{
+				finish_turn_command(command);
+				break;
+			}
+
+			/* Stopped short: restore steering and make a slower approach. */
+			turn_approach_count++;
+			turn_i_error_deg_s = 0.0f;
+			turn_pid_last_tick = now;
+			turn_control_phase = TURN_CTRL_DRIVE;
+			set_turn_servo_for_command(command);
+			turn_motor_enable_tick = now + TURN_RETRY_SERVO_MS;
+			break;
+		}
+
+		/*
+		* Predict motion during sensing + braking delay. At 100 deg/s and
+		* 45 ms look-ahead this begins braking about 4.5 degrees early.
+		*/
+		const float positive_closing_rate = (closing_rate > 0.0f) ? closing_rate : 0.0f;
+		const float brake_margin = TURN_FINISH_TOL_DEG +
+								 TURN_BRAKE_LOOKAHEAD_S * positive_closing_rate;
+
+		if (remaining <= brake_margin)
+		{
+			motor_brake();
+			center_servo_after_turn(command);
+			turn_effort_cmd = 0.0f;
+			turn_left_pwm = PWM_MAX;
+			turn_right_pwm = PWM_MAX;
+			turn_control_phase = TURN_CTRL_SETTLE;
+			turn_settle_until_tick = now + TURN_SETTLE_MS;
+			break;
+		}
+
+		float dt_s = (float)(now - turn_pid_last_tick) * 0.001f;
+		if (dt_s < 0.001f)
+			dt_s = 0.001f;
+		if (dt_s > 0.050f)
+			dt_s = 0.050f;
+		turn_pid_last_tick = now;
+
+		float candidate_i = turn_i_error_deg_s + remaining * dt_s;
+		if (candidate_i > TURN_I_LIMIT_DEG_S)
+			candidate_i = TURN_I_LIMIT_DEG_S;
+		if (candidate_i < -TURN_I_LIMIT_DEG_S)
+			candidate_i = -TURN_I_LIMIT_DEG_S;
+
+		float effort = TURN_KP_EFFORT_PER_DEG * remaining +
+					 TURN_KI_EFFORT_PER_DEG_S * candidate_i -
+					 TURN_KD_EFFORT_PER_DPS * closing_rate;
+
+		/* Conditional integration prevents wind-up while output is saturated. */
+		if (effort < TURN_OUTER_EFFORT_MAX)
+			turn_i_error_deg_s = candidate_i;
+
+		if (effort > TURN_OUTER_EFFORT_MAX)
+			effort = TURN_OUTER_EFFORT_MAX;
+		if (effort < TURN_OUTER_EFFORT_MIN)
+			effort = TURN_OUTER_EFFORT_MIN;
+
+		const float inner_ratio = is_right_steer_turn(command)
+								  ? TURN_INNER_EFFORT_RATIO_R
+								  : TURN_INNER_EFFORT_RATIO_L;
+
+		const int outer_pwm = pwm_compare_from_effort(effort);
+		const int inner_pwm = pwm_compare_from_effort(effort * inner_ratio);
+
+		turn_effort_cmd = effort;
+		drive_turn_wheels(command, outer_pwm, inner_pwm);
+		break;
+	} // luther turn end
+
+	case CMD_STOP:
+		motor_brake();
+		uart_cmd = CMD_NONE;
+		next_start_tick = HAL_GetTick() + SLIDE_CMD_MS;
+
+		break;
+
+	case CMD_NONE:
+	default:
+	{
+		if (!cmdq_empty())
+		{
+			if (HAL_GetTick() >= next_start_tick)
+			{
+				if (!start_next_from_queue())
+					{
+					// queue emptied right here -> ACK script finished
+					//		                send_ack();
+					}
+			}
+		}
+		else
+		{
+			// idle with empty queue: make sure next_start_tick doesn’t block future scripts
+			next_start_tick = 0;
+		}
+		break;
+	}
+	}
+	osDelay(5);
+	}
+	  /* USER CODE END motorTask */
 }
 
 /* USER CODE BEGIN Header_encoderTask */
@@ -3829,6 +3935,7 @@ void encoderTask(void const * argument)
 /* USER CODE END Header_gyroTask */
 void gyroTask(void const * argument)
 {
+
   /* USER CODE BEGIN gyroTask */
 
   //	gyroInit();
@@ -3884,83 +3991,90 @@ void gyroTask(void const * argument)
   //	        }
   //	    }
 
-  GyroSafe gyro = {0};
+	GyroSafe gyro = {0};
 
-  for (;;)
-  {
-    gyro_healthy = 0U;
-    gyro_yaw_rate_dps = 0.0f;
+	for (;;)
+	{
+		gyro_healthy = 0U;
+		gyro_yaw_rate_dps = 0.0f;
 
-    if (!GyroSafe_Recover(&gyro, &hi2c2))
-    {
-      Telemetry_RecordFault("GYRO_INIT");
-      osDelay(GYRO_RETRY_DELAY_MS);
-      continue;
-    }
+		while (!steering_homed)
+		{
+			osDelay(20);
+		}
 
-    /* Keep the robot completely still for this approximately two-second
-     * calibration. Any failed sample rejects the whole calibration. */
-    if (!GyroSafe_Calibrate(&gyro, 200U, GYRO_PERIOD_MS))
-    {
-      Telemetry_RecordFault("GYRO_CAL");
-      osDelay(GYRO_RETRY_DELAY_MS);
-      continue;
-    }
+		if (!GyroSafe_Recover(&gyro, &hi2c2))
+		{
+			Telemetry_RecordFault("GYRO_INIT");
+			osDelay(GYRO_RETRY_DELAY_MS);
+			continue;
+		}
 
-    gyro_bias_dps = gyro.bias_raw / 16.4f;
+		/* Keep the robot completely still for this approximately two-second
+		 * calibration. Any failed sample rejects the whole calibration. */
+		if (!GyroSafe_Calibrate(&gyro, 200U, GYRO_PERIOD_MS))
+		{
+			Telemetry_RecordFault("GYRO_CAL");
+			osDelay(GYRO_RETRY_DELAY_MS);
+			continue;
+		}
 
-    /* Heading cannot be reconstructed across a sensor failure, so rebase it
-     * after a successful recovery. motorTask prevents motion while unhealthy. */
-    total_angle = 0.0f;
-    target_angle = 0.0f;
-    arc_target_angle = 0.0f;
+		gyro_bias_dps = gyro.bias_raw / 16.4f;
 
-    uint32_t tick = HAL_GetTick();
-    float previous_rate_dps = 0.0f;
-    uint8_t consecutive_failures = 0U;
+		/* Heading cannot be reconstructed across a sensor failure, so rebase it
+		 * after a successful recovery. motorTask prevents motion while unhealthy. */
+		total_angle = 0.0f;
+		target_angle = 0.0f;
+		arc_target_angle = 0.0f;
 
-    gyro_last_good_tick = tick;
-    gyro_healthy = 1U;
+		uint32_t tick = HAL_GetTick();
+		float previous_rate_dps = 0.0f;
+		uint8_t consecutive_failures = 0U;
 
-    for (;;)
-    {
-      float rate_dps;
-      osDelay(GYRO_PERIOD_MS);
+		gyro_last_good_tick = tick;
+		gyro_healthy = 1U;
 
-      if (!GyroSafe_ReadRateDps(&gyro, GYRO_SCALE_TRIM, &rate_dps))
-      {
-        consecutive_failures++;
-        if (consecutive_failures >= GYRO_MAX_CONSECUTIVE_FAILURES)
-        {
-          gyro_healthy = 0U;
-          gyro_yaw_rate_dps = 0.0f;
-          Telemetry_RecordFault("GYRO_I2C");
-          break;
-        }
-        continue;
-      }
+		for (;;)
+		{
+			float rate_dps;
+			osDelay(GYRO_PERIOD_MS);
 
-      consecutive_failures = 0U;
+			if (!GyroSafe_ReadRateDps(&gyro, GYRO_SCALE_TRIM, &rate_dps))
+			{
+				consecutive_failures++;
 
-      uint32_t now = HAL_GetTick();
-      float dt_s = (float)(now - tick) * 0.001f;
-      tick = now;
-      gyro_last_good_tick = now;
+				if (consecutive_failures >= GYRO_MAX_CONSECUTIVE_FAILURES)
+				{
+					gyro_healthy = 0U;
+					gyro_yaw_rate_dps = 0.0f;
+					Telemetry_RecordFault("GYRO_I2C");
+					break;
+				}
 
-      if (dt_s > 0.050f)
-        dt_s = 0.050f;
+				continue;
+			}
 
-      if (fabsf(rate_dps) < GYRO_RATE_DEADBAND_DPS)
-        rate_dps = 0.0f;
+			consecutive_failures = 0U;
 
-      total_angle += 0.5f * (previous_rate_dps + rate_dps) * dt_s;
-      previous_rate_dps = rate_dps;
-      gyro_yaw_rate_dps = rate_dps;
-    }
+			uint32_t now = HAL_GetTick();
+			float dt_s = (float)(now - tick) * 0.001f;
+			tick = now;
+			gyro_last_good_tick = now;
 
-    osDelay(GYRO_RETRY_DELAY_MS);
-  }
-  /* USER CODE END gyroTask */
+			if (dt_s > 0.050f)
+				dt_s = 0.050f;
+
+			if (fabsf(rate_dps) < GYRO_RATE_DEADBAND_DPS)
+				rate_dps = 0.0f;
+
+			total_angle += 0.5f * (previous_rate_dps + rate_dps) * dt_s;
+			previous_rate_dps = rate_dps;
+			gyro_yaw_rate_dps = rate_dps;
+		}
+
+		osDelay(GYRO_RETRY_DELAY_MS);
+	}
+	/* USER CODE END gyroTask */
 }
 
 /* USER CODE BEGIN Header_ultrasoundTask */
