@@ -251,13 +251,13 @@ volatile float arc_target_angle = 0.0f;
 #define TURN_KD_EFFORT_PER_DPS        2.0f
 #define TURN_I_LIMIT_DEG_S           60.0f
 
-#define TURN_OUTER_EFFORT_MAX      2060.0f  // approximately the old 4800 * 1.07 command
+#define TURN_OUTER_EFFORT_MAX      2600.0f  // approximately the old 4800 * 1.07 command
 #define TURN_OUTER_EFFORT_MIN       650.0f
 #define TURN_INNER_EFFORT_RATIO_R     0.42f
 #define TURN_INNER_EFFORT_RATIO_L     0.42f
 
 #define TURN_FINISH_TOL_DEG           0.5f //tighten the finish tolerance by decreasing
-#define TURN_BRAKE_LOOKAHEAD_S        0.007f // main parameter for consistent overshoot, Overshooting: increase look-ahead
+#define TURN_BRAKE_LOOKAHEAD_S        0.010f // main parameter for consistent overshoot, Overshooting: increase look-ahead
 #define TURN_SETTLE_MS               150U
 #define TURN_RETRY_SERVO_MS           80U
 #define TURN_MAX_APPROACHES            3U
