@@ -200,7 +200,7 @@ class Task1:
 
                         self.path_ready.clear()
                         self.path_requested = False
-                        self._schedule_path_calculation()
+                        #self._schedule_path_calculation()
 
                     elif msg_parts[0] == "CLEAR":
                         # CLEAR,id,x,y,-1 -> remove one obstacle by ID
@@ -227,34 +227,25 @@ class Task1:
                         )
 
                         self.path_ready.clear()
-                        self.path_requested = False
-                        self._schedule_path_calculation()
+                        #self.path_requested = False
+                        #self._schedule_path_calculation()
 
                     elif msg_parts[0] == "RESET":
                         # RESET -> remove all obstacles
-                        with self._debounce_lock:
-                            if self._calc_timer is not None:
-                                self._calc_timer.cancel()
-                                self._calc_timer = None
-
                         self.obstacles = []
                         self.obstacle_order = []
                         self.path_ready.clear()
-                        self.path_requested = False
+                        #self.path_requested = False
 
                         logging.info("Reset obstacle list.")
-                    elif msg_parts[0].strip() == "PATH" or android_msg.startswith("ALG|"):
-                        if self.started and self.path_ready.is_set():
-                            logging.info("Ignoring PATH request from Android; PATH already ready and mission started.")
-                        else:
-                            # User explicitly pressed "Send Data" — cancel any pending debounce
-                            # and force a fresh calculation even if one is already in-flight.
-                            with self._debounce_lock:
-                                if self._calc_timer is not None:
-                                    self._calc_timer.cancel()
-                                    self._calc_timer = None
-                            self.path_requested = False  # force fresh calculation, overwriting any in-flight request
-                            self._request_path_from_pc()
+
+                    elif msg_parts[0].strip() == "CALCULATE":
+                        if self.started:
+                            logging.info("Ignoring CALCULATE because the mission has already started.")
+                            continue    
+                        self.path_ready.clear()
+                        self._request_path_from_pc()
+
             except OSError as e:
                 print(f"Error: {e}")
                 continue
@@ -276,6 +267,9 @@ class Task1:
 
                     self.path_requested = False
                     self.path_ready.set()
+
+                    self.android.send("PATHREADY")
+                    logging.info("Sent PATHREADY to Android.")
 
                     # BEGIN may have arrived before PATH.
                     if self.started and self.segments_index == 0:
