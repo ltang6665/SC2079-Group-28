@@ -1,6 +1,7 @@
 \venv
 Debug/
 Release/
+/STM_stuff/**/Debug/
 *.o
 *.d
 *.elf

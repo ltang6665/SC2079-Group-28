@@ -10,6 +10,17 @@ void Telemetry_StartCommand(const char *command_name, int value);
 /* Records a fault for EncoderTask to transmit; safe to call from another task. */
 void Telemetry_RecordFault(const char *fault_code);
 
+/* MotorTask only publishes a RAM snapshot: no formatting or UART waits here. */
+void Telemetry_PublishWheelPi(
+    uint32_t control_tick_ms, uint32_t control_dt_ms,
+    float cps_a_filtered, float cps_b_filtered, int32_t speed_error,
+    int32_t i_acc, int32_t i_limit, int applied_off, int drive_percent,
+    int left_pwm, int right_pwm
+);
+void Telemetry_ClearWheelPi(void);
+/* EncoderTask transmits at most one snapshot every 40 ms (25 Hz). */
+void Telemetry_SendWheelPi(uint8_t straight_active);
+
 /* Called by EncoderTask. sample_dt_ms is the real encoder measurement window. */
 void Telemetry_SendEncoder(
     int16_t motor_a,
