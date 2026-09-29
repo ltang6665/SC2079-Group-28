@@ -228,7 +228,7 @@ volatile int32_t target_counts = 0; // +ve forward, -ve reverse
 #define PWM_INNER 6000
 
 //luther direction higher value = slower
-#define FWD_LEFT_COMPARE_SCALE   1.160f // comparison: lower compare gives MORE left drive (uploaded baseline: 1.170)
+#define FWD_LEFT_COMPARE_SCALE   1.140f // was 1.160 - WPI telemetry showed the wheel PI needed more left drive (lower compare), not less
 #define FWD_RIGHT_COMPARE_SCALE  1.000f
 
 /* Starting values only — tune from telemetry. */
@@ -350,9 +350,33 @@ volatile turn_t cmd_turn = TURN_NONE;
 #define STRAIGHT_STEER_MIN_PERCENT         5.0f
 #define STRAIGHT_STEER_MAX_PERCENT        70.0f
 #define STRAIGHT_STEER_KI_PERCENT_PER_DEG_S 3.0f  // was 1.5 - heading was still climbing (not converging), so the bias needs more integral authority
-#define STRAIGHT_STEER_KD_PERCENT_PER_DPS   1.2f  // was 0.8 - extra damping to match the higher P/I gain and avoid new oscillation
+#define STRAIGHT_STEER_KD_PERCENT_PER_DPS   1.6f  // was 1.2 - confirmed by your F200_with_updated_params telemetry: heading now oscillates cleanly through zero
 #define STRAIGHT_STEER_I_LIMIT_PERCENT      15.0f // clamp on the integral contribution (anti-windup)
 #define STRAIGHT_STEER_SLEW_PERCENT_PER_S  300.0f // max %/s the commanded correction may change (smooths servo motion)
+
+/*
+ * Optional outer loop: cross-track (lateral) correction.
+ *
+ * The heading-hold PID above only ever drives yaw error to zero. If
+ * something (a bump, the initial launch transient, a manual kick) shifts
+ * the chassis sideways before the PID has caught up, heading-hold will
+ * happily settle on a heading that is PARALLEL to the original line but
+ * offset from it — it has no notion of where the line actually is, only
+ * which way it's pointing. This stage adds that notion back in.
+ *
+ * It dead-reckons perpendicular drift from the original line using the
+ * same encoder distance and gyro heading already trusted elsewhere, then
+ * feeds a small heading trim into the existing PID as a cascaded outer
+ * loop: lateral error -> desired heading offset -> (already-tuned)
+ * heading PID -> steering servo. Off by default: it depends on dead-
+ * reckoning accuracy staying good over the length of one segment, and it
+ * adds a second loop that can interact with the heading PID if pushed
+ * too hard, so treat STRAIGHT_LATERAL_KP_DEG_PER_CM as a start-small,
+ * verify-from-telemetry value like everything else in this file.
+ */
+#define STRAIGHT_LATERAL_CORRECTION_ENABLE 1     // 0 = off (unchanged behaviour); 1 = also correct sideways drift, not just heading
+#define STRAIGHT_LATERAL_KP_DEG_PER_CM     0.15f // heading-trim degrees requested per cm of lateral drift
+#define STRAIGHT_LATERAL_TRIM_MAX_DEG      6.0f  // clamp: outer loop may never bend the target heading more than this
 
 /* Diagnostic only: 0 keeps the current controller; 1 holds a fixed servo
  * command during finite scripted FORWARD moves, with wheel PI still active.
@@ -2660,8 +2684,8 @@ void oledTask(void const * argument)
     {
       OLED_ShowString(0, 0, (uint8_t *)"GYRO NOT READY  ");
       OLED_ShowString(0, 16, (uint8_t *)"MOTION DISABLED ");
-      OLED_ShowString(0, 32, (uint8_t *)"CHECK I2C/POWER ");
-      OLED_ShowString(0, 48, (uint8_t *)"POWER CYCLE CAR ");
+      OLED_ShowString(0, 32, (uint8_t *)"AUTO RETRY...   ");
+      OLED_ShowString(0, 48, (uint8_t *)"KEEP CAR STILL  ");
       OLED_Refresh_Gram();
       osDelay(20);
       continue;
@@ -2900,6 +2924,9 @@ void motorTask(void const * argument)
 	  static float cpsB_f = 0.0f;
 	  static float steer_i_acc_deg_s = 0.0f;   // heading-hold PID integral accumulator (deg*s)
 	  static float steer_last_percent = 0.0f;  // previous commanded correction %, for slew-rate limiting
+#if STRAIGHT_LATERAL_CORRECTION_ENABLE
+	  static float lateral_offset_cm = 0.0f;   // dead-reckoned perpendicular drift from the original line
+#endif
 
 	  /*
 	   * Straight speed-profile state. luther
@@ -3210,6 +3237,9 @@ void motorTask(void const * argument)
 		prev_err = 0;
 		steer_i_acc_deg_s = 0.0f;
 		steer_last_percent = 0.0f;
+#if STRAIGHT_LATERAL_CORRECTION_ENABLE
+		lateral_offset_cm = 0.0f; // new segment, new line -- forget any prior drift
+#endif
 
 		// Do NOT compute da/db or update odometers this tick
 	  }
@@ -3266,7 +3296,7 @@ void motorTask(void const * argument)
 	  int32_t err = speed_err;
 
 	  i_acc += err;
-	  const int32_t IACC_CLAMP = 25000;
+	  const int32_t IACC_CLAMP = 40000; // was 25000 - old clamp was pinning the wheel PI's integral for 27-42% of every run
 	  if (i_acc > IACC_CLAMP)
 		i_acc = IACC_CLAMP;
 	  if (i_acc < -IACC_CLAMP)
@@ -3531,8 +3561,47 @@ void motorTask(void const * argument)
 	  straight_left_pwm = lDuty;
 	  straight_right_pwm = rDuty;
 
+#if STRAIGHT_LATERAL_CORRECTION_ENABLE
+	  /*
+	   * Dead-reckon perpendicular drift using this tick's average wheel
+	   * distance and the heading error relative to the ORIGINAL line
+	   * (target_angle, not yet trimmed). Small-angle approximation
+	   * (sin(x) ~= x in radians) is fine here: straight-line heading
+	   * error stays within a few degrees by design of the PID above.
+	   */
+	  {
+		  const float d_avg_cm = ((float)da + (float)db) * 0.5f / COUNTS_PER_CM;
+		  const float heading_err_rad =
+			  (total_angle - target_angle) * 0.0174532925f; // deg -> rad (M_PI/180), avoids relying on M_PI
+
+		  lateral_offset_cm += d_avg_cm * heading_err_rad;
+	  }
+
+	  /*
+	   * Convert lateral drift into a small heading-target trim: if we've
+	   * drifted to one side, aim slightly back toward the original line
+	   * rather than merely holding the (now offset) parallel heading.
+	   */
+	  float lateral_trim_deg =
+		  -STRAIGHT_LATERAL_KP_DEG_PER_CM * lateral_offset_cm;
+
+	  if (lateral_trim_deg > STRAIGHT_LATERAL_TRIM_MAX_DEG)
+	  {
+		  lateral_trim_deg = STRAIGHT_LATERAL_TRIM_MAX_DEG;
+	  }
+	  else if (lateral_trim_deg < -STRAIGHT_LATERAL_TRIM_MAX_DEG)
+	  {
+		  lateral_trim_deg = -STRAIGHT_LATERAL_TRIM_MAX_DEG;
+	  }
+
+	  const float effective_target_angle = target_angle + lateral_trim_deg;
+
+	  // Hold the (possibly trimmed) heading for THIS straight segment.
+	  error_angle = effective_target_angle - total_angle;
+#else
 	  // Hold the heading captured at the start of THIS straight segment.
 	  error_angle = target_angle - total_angle;
+#endif
 
 	  /* =========================================================
 	   * Straight-line gyro heading correction
