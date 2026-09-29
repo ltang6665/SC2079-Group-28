@@ -194,19 +194,55 @@ class Task1:
                             self.obstacles.append(obstacle)
                             logging.info(f"Added obstacle: {obstacle}")
 
+                        logging.info(
+                            f"Current obstacles ({len(self.obstacles)}): {self.obstacles}"
+                        )
+
                         self.path_ready.clear()
                         self.path_requested = False
                         self._schedule_path_calculation()
+
                     elif msg_parts[0] == "CLEAR":
+                        # CLEAR,id,x,y,-1 -> remove one obstacle by ID
+                        obstacle_id = int(msg_parts[1])
+
+                        original_count = len(self.obstacles)
+
+                        self.obstacles = [
+                            obstacle
+                            for obstacle in self.obstacles
+                            if obstacle["id"] != obstacle_id
+                        ]
+
+                        if len(self.obstacles) < original_count:
+                            logging.info(f"Removed obstacle ID {obstacle_id}.")
+                        else:
+                            logging.warning(
+                                f"CLEAR received for obstacle ID {obstacle_id}, "
+                                "but no matching obstacle was found."
+                            )
+
+                        logging.info(
+                            f"Current obstacles ({len(self.obstacles)}): {self.obstacles}"
+                        )
+
+                        self.path_ready.clear()
+                        self.path_requested = False
+                        self._schedule_path_calculation()
+
+                    elif msg_parts[0] == "RESET":
+                        # RESET -> remove all obstacles
                         with self._debounce_lock:
                             if self._calc_timer is not None:
                                 self._calc_timer.cancel()
                                 self._calc_timer = None
+
                         self.obstacles = []
                         self.obstacle_order = []
                         self.path_ready.clear()
                         self.path_requested = False
-                        logging.info("Cleared obstacles list.")
+
+                        logging.info("Reset obstacle list.")
                     elif msg_parts[0].strip() == "PATH" or android_msg.startswith("ALG|"):
                         if self.started and self.path_ready.is_set():
                             logging.info("Ignoring PATH request from Android; PATH already ready and mission started.")
