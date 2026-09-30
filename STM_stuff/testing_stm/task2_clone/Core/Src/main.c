@@ -348,12 +348,15 @@ volatile turn_t cmd_turn = TURN_NONE;
  * wheel-speed PI remains responsible for balancing encoder speeds. */
 #define STRAIGHT_STEER_DEADBAND_DEG         0.01f
 #define STRAIGHT_STEER_MIN_PERCENT          0.01f
-#define STRAIGHT_STEER_MAX_PERCENT          70.0f
-#define STRAIGHT_STEER_KP_PERCENT_PER_DEG   29.2f // 15 first PID test only used ~15% of the 70% ceiling for a <1 deg error, plenty of headroom to push harder
-#define STRAIGHT_STEER_KI_PERCENT_PER_DEG_S 0.00f   // 8 was 0.02176 (effectively zero: <0.03% servo authority over a whole run). Sweep 5 -> 8 -> 12 from telemetry
-#define STRAIGHT_STEER_KD_PERCENT_PER_DPS   2.00f  // 9 408 confirmed by your F200_with_updated_params telemetry: heading now oscillates cleanly through zero
+#define STRAIGHT_STEER_MAX_PERCENT          40.0f
+#define STRAIGHT_STEER_KP_PERCENT_PER_DEG   15.0f // 29.2 first PID test only used ~15% of the 70% ceiling for a <1 deg error, plenty of headroom to push harder
+#define STRAIGHT_STEER_KI_PERCENT_PER_DEG_S 3.30f   // 1 was 0.02176 (effectively zero: <0.03% servo authority over a whole run). Sweep 5 -> 8 -> 12 from telemetry
+#define STRAIGHT_STEER_KD_PERCENT_PER_DPS   0.50f  // 2.5 408 confirmed by your F200_with_updated_params telemetry: heading now oscillates cleanly through zero
 #define STRAIGHT_STEER_I_LIMIT_PERCENT      20.0f // clamp on the integral contribution (anti-windup)
 #define STRAIGHT_STEER_SLEW_PERCENT_PER_S  90000.0f // max %/s the commanded correction may change (smooths servo motion)
+#define STRAIGHT_STEER_D_LPF_TAU_S 0.050f // low pass filter tau value, higher value --> stronger filtering
+
+// #define STRAIGHT_RECENTER_SIDE_THRESHOLD_PERCENT 3.0f
 
 /* Integrator gating: only learn the steering bias while cruising, never during
  * launch or decel, and never while the heading error is large (avoids winding
@@ -2951,6 +2954,7 @@ void motorTask(void const * argument)
 	  static float steer_last_percent = 0.0f;  // previous commanded correction %, for slew-rate limiting
 	  static bool  steer_hold_latched = false;   // true once decel has started and the servo trim is latched
 	  static float steer_hold_percent = 0.0f;    // latched servo correction (integral trim) held through decel
+	  static float steer_d_rate_f = 0.0f;
 #if STRAIGHT_LATERAL_CORRECTION_ENABLE
 	  static float lateral_offset_cm = 0.0f;   // dead-reckoned perpendicular drift from the original line
 #endif
@@ -3270,6 +3274,7 @@ void motorTask(void const * argument)
 		steer_last_percent = 0.0f;
 		steer_hold_latched = false;
 		steer_hold_percent = 0.0f;
+		steer_d_rate_f = 0.0f;
 
 		straight_steer_p_percent = 0.0f;
 		straight_steer_i_percent = 0.0f;
@@ -3686,29 +3691,58 @@ void motorTask(void const * argument)
 		  drive_profile_percent >= STRAIGHT_STEER_I_MIN_DRIVE_PERCENT &&
 		  fabsf(steering_error) < STRAIGHT_STEER_I_ERR_BAND_DEG;
 
-	  if (steer_i_enabled)
+	  /*
+	   * Integral controller + anti-windup.
+	   *
+	   * Ki may intentionally be set to zero while tuning.
+	   * Do not divide by Ki when it is disabled.
+	   */
+	  if (STRAIGHT_STEER_KI_PERCENT_PER_DEG_S > 0.0f)
 	  {
-		  steer_i_acc_deg_s += steering_error * dt_s;
+	      if (steer_i_enabled)
+	      {
+	          steer_i_acc_deg_s += steering_error * dt_s;
+	      }
+
+	      const float i_limit_deg_s =
+	          STRAIGHT_STEER_I_LIMIT_PERCENT /
+	          STRAIGHT_STEER_KI_PERCENT_PER_DEG_S;
+
+	      if (steer_i_acc_deg_s > i_limit_deg_s)
+	      {
+	          steer_i_acc_deg_s = i_limit_deg_s;
+	      }
+	      else if (steer_i_acc_deg_s < -i_limit_deg_s)
+	      {
+	          steer_i_acc_deg_s = -i_limit_deg_s;
+	      }
 	  }
-
-	  /* Anti-windup: clamp the accumulator itself, in percent-equivalent units. */
+	  else
 	  {
-		  const float i_limit_deg_s =
-			  STRAIGHT_STEER_I_LIMIT_PERCENT / STRAIGHT_STEER_KI_PERCENT_PER_DEG_S;
-
-		  if (steer_i_acc_deg_s > i_limit_deg_s)
-		  {
-			  steer_i_acc_deg_s = i_limit_deg_s;
-		  }
-		  else if (steer_i_acc_deg_s < -i_limit_deg_s)
-		  {
-			  steer_i_acc_deg_s = -i_limit_deg_s;
-		  }
+	      /*
+	       * Ki is disabled.
+	       * Keep the accumulator clean so enabling Ki later
+	       * cannot suddenly apply an old accumulated error.
+	       */
+	      steer_i_acc_deg_s = 0.0f;
 	  }
 
 	  const float steer_p_term = STRAIGHT_STEER_KP_PERCENT_PER_DEG * steering_error;
 	  const float steer_i_term = STRAIGHT_STEER_KI_PERCENT_PER_DEG_S * steer_i_acc_deg_s;
-	  const float steer_d_term = -STRAIGHT_STEER_KD_PERCENT_PER_DPS * gyro_yaw_rate_dps;
+	  /*
+	   * Low-pass filter the gyro yaw rate used by the derivative term.
+	   *
+	   * This keeps real chassis rotation but rejects much of the
+	   * high-frequency gyro/vibration noise that D would otherwise amplify.
+	   */
+	  const float d_alpha =
+	      dt_s / (STRAIGHT_STEER_D_LPF_TAU_S + dt_s);
+
+	  steer_d_rate_f +=
+	      d_alpha * (gyro_yaw_rate_dps - steer_d_rate_f);
+
+	  const float steer_d_term =
+	      -STRAIGHT_STEER_KD_PERCENT_PER_DPS * steer_d_rate_f;
 
 	  float correction_percent = steer_p_term + steer_i_term + steer_d_term;
 
