@@ -24,6 +24,8 @@ class ArenaActivity : AppCompatActivity() {
     private lateinit var status: TextView
     private lateinit var statusScroll: ScrollView // for auto scrolling of status log
 
+    var compiledObstacles = mutableListOf<Obstacle>()
+
     companion object {
         private const val TAG = "ArenaActivity12345"
     }
@@ -58,17 +60,37 @@ class ArenaActivity : AppCompatActivity() {
         }*/
         arena.onObstacleDropped = { obs ->
             Log.d(TAG, "Callback [onObstacleDropped]")
-            BluetoothService.send(Protocol.obstacle(obs.id, obs.cellX, obs.cellY))
+            // BluetoothService.send(Protocol.obstacle(obs.id, obs.cellX, obs.cellY))
+            addToCompiled(obs, "dropped")
             appendStatus("Dropped obstacle ${obs.id} at (${obs.cellX},${obs.cellY})")
         }
         arena.onObstacleRemoved = { obs ->
             Log.d(TAG, "Callback [onObstacleRemoved]")
-            BluetoothService.send(Protocol.obstacleDeleted(obs.id, obs.cellX, obs.cellY))
+            // BluetoothService.send(Protocol.obstacleDeleted(obs.id, obs.cellX, obs.cellY))
+            addToCompiled(obs, "remove")
             appendStatus("Removed obstacle ${obs.id}")
         }
         arena.onObstacleLongPress = { obs ->
             Log.d(TAG, "Callback [onObstacleLongPress]")
             showFaceDialog(obs)
+        }
+
+        // new btn to send compiled list of obstacles
+    }
+
+    private fun addToCompiled(obs: Obstacle, instruction: String) {
+        if (instruction == "longPress" || instruction == "dropped") {
+            // add or update obstacle in compiled list
+            compiledObstacles.removeAll { it.id == obs.id }
+            compiledObstacles.add(obs)
+
+            /* if order of obstacles matter:
+                val index = compiledObstacles.indexOfFirst { it.id == obs.id }
+                if (index >= 0) compiledObstacles[index] = obs else compiledObstacles.add(obs)
+             */
+        } else if (instruction == "remove") {
+            // remove obstacle from list
+            compiledObstacles.removeAll { it.id == obs.id }
         }
     }
 
@@ -91,13 +113,47 @@ class ArenaActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnStart).setOnClickListener {
             if (BluetoothService.send(Protocol.start())) {
                 appendStatus("Sent START")
+
+                Log.d(TAG, "Attempting to send obstacles individually...")
+                compiledObstacles.forEach { obs ->
+                    val face = obs.face
+                    if (face != null) {
+                        BluetoothService.send(Protocol.face(obs.id, obs.cellX, obs.cellY, face))
+                    } else {
+                        BluetoothService.send(Protocol.obstacle(obs.id, obs.cellX, obs.cellY))
+                    }
+                }
+                Log.d(TAG, "Obstacles sent (${compiledObstacles.size}): " +
+                        compiledObstacles.joinToString { "id=${it.id} (${it.cellX},${it.cellY}) face=${it.face}" })
+
             } else {
                 appendStatus("START failed — not connected")
+                Log.d(TAG, "Going to send the list of obstacles")
+
+                Log.d(TAG, "Attempting to send obstacles individually...")
+
+                compiledObstacles.forEach { obs ->
+                    val face = obs.face
+                    if (face != null) {
+                        BluetoothService.send(Protocol.face(obs.id, obs.cellX, obs.cellY, face))
+                    } else {
+                        BluetoothService.send(Protocol.obstacle(obs.id, obs.cellX, obs.cellY))
+                    }
+                }
+                Log.d(TAG, "Obstacles sent (${compiledObstacles.size}): " +
+                        compiledObstacles.joinToString { "id=${it.id} (${it.cellX},${it.cellY}) face=${it.face}" })
+
             }
         }
         findViewById<Button>(R.id.btnReset).setOnClickListener {
             arena.reset()
-            appendStatus("Arena reset")
+            compiledObstacles.clear()
+
+            if (BluetoothService.send(Protocol.reset())) {
+                appendStatus("Arena reset")
+            } else {
+                appendStatus("RESET failed - not connected")
+            }
         }
     }
 
@@ -138,7 +194,8 @@ class ArenaActivity : AppCompatActivity() {
                 arena.setObstacleFace(obs.id, face)
                 if (face != null) {
                     // BluetoothService.send(Protocol.obstacle(obs.id, obs.cellX, obs.cellY))
-                    BluetoothService.send(Protocol.face(obs.id, obs.cellX, obs.cellY, face))
+                    // BluetoothService.send(Protocol.face(obs.id, obs.cellX, obs.cellY, face))
+                    addToCompiled(obs, "longPress")
                     appendStatus("Obstacle ${obs.id} face -> ${face.value}")
                     Log.d(TAG, "Protocol.face(obs.id, face")
                 } else {

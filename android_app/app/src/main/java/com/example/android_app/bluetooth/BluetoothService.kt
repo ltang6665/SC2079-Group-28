@@ -28,7 +28,7 @@ import java.util.UUID
 
 object BluetoothService {
 
-    private const val TAG = "BluetoothService"
+    private const val TAG = "BluetoothService!!"
     // Standard SPP UUID used by RPi rfcomm channels
     private val SPP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
     private const val RECONNECT_DELAY_MS = 2500L
@@ -179,7 +179,12 @@ object BluetoothService {
      * Send a line of text. A trailing '\n' is added if absent.
      */
     fun send(text: String): Boolean {
+        Log.d(TAG, "testing1")
+
         val payload = if (text.endsWith("\n")) text else "$text\n"
+
+        Log.d(TAG, "Sent ${payload.replace("\r", "\\r").replace("\n", "\\n")}")
+
         val out = output ?: return false
         return try {
             out.write(payload.toByteArray(Charsets.UTF_8))

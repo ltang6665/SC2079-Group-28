@@ -23,6 +23,7 @@ object Protocol {
     fun face(id: Int, x: Int, y: Int, dir: Facing): String = "OBSTACLE,$id,$x,$y,${dir.value}"
     fun move(cmd: MoveCmd): String = "ROBOT_MOVE,${cmd.token}"
     fun start(): String = "BEGIN"
+    fun reset(): String = "RESET"
 
     enum class MoveCmd(val token: Char) {
         FORWARD('F'), BACKWARD('B'), LEFT('L'), RIGHT('R'), STOP('S')
