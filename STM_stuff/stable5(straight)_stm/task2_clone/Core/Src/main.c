@@ -356,6 +356,7 @@ volatile turn_t cmd_turn = TURN_NONE;
 #define STRAIGHT_STEER_SLEW_PERCENT_PER_S  90000.0f // max %/s the commanded correction may change (smooths servo motion)
 #define STRAIGHT_STEER_D_LPF_TAU_S 0.050f // low pass filter tau value, higher value --> stronger filtering
 
+// #define STRAIGHT_RECENTER_SIDE_THRESHOLD_PERCENT 3.0f
 
 /* Integrator gating: only learn the steering bias while cruising, never during
  * launch or decel, and never while the heading error is large (avoids winding
@@ -369,6 +370,30 @@ volatile turn_t cmd_turn = TURN_NONE;
  *     learned bias trim (the integral term) so the car keeps its straight line
  *     without reacting to gyro noise / the decel disturbance. Integrator is frozen. */
 #define STRAIGHT_DECEL_STEER_HOLD           0
+
+/*
+ * Optional outer loop: cross-track (lateral) correction.
+ *
+ * The heading-hold PID above only ever drives yaw error to zero. If
+ * something (a bump, the initial launch transient, a manual kick) shifts
+ * the chassis sideways before the PID has caught up, heading-hold will
+ * happily settle on a heading that is PARALLEL to the original line but
+ * offset from it — it has no notion of where the line actually is, only
+ * which way it's pointing. This stage adds that notion back in.
+ *
+ * It dead-reckons perpendicular drift from the original line using the
+ * same encoder distance and gyro heading already trusted elsewhere, then
+ * feeds a small heading trim into the existing PID as a cascaded outer
+ * loop: lateral error -> desired heading offset -> (already-tuned)
+ * heading PID -> steering servo. Off by default: it depends on dead-
+ * reckoning accuracy staying good over the length of one segment, and it
+ * adds a second loop that can interact with the heading PID if pushed
+ * too hard, so treat STRAIGHT_LATERAL_KP_DEG_PER_CM as a start-small,
+ * verify-from-telemetry value like everything else in this file.
+ */
+#define STRAIGHT_LATERAL_CORRECTION_ENABLE 0     // 0 = off (unchanged behaviour); 1 = also correct sideways drift, not just heading
+#define STRAIGHT_LATERAL_KP_DEG_PER_CM     0.02f // heading-trim degrees requested per cm of lateral drift was 0.15
+#define STRAIGHT_LATERAL_TRIM_MAX_DEG      5.0f  // clamp: outer loop may never bend the target heading more than this
 
 // diagnostic flags
 #define STRAIGHT_DIAG_FIXED_SERVO          0 // 0 = full PID steering active (recommended); 1 = bypass, for A/B testing only
@@ -2930,6 +2955,9 @@ void motorTask(void const * argument)
 	  static bool  steer_hold_latched = false;   // true once decel has started and the servo trim is latched
 	  static float steer_hold_percent = 0.0f;    // latched servo correction (integral trim) held through decel
 	  static float steer_d_rate_f = 0.0f;
+#if STRAIGHT_LATERAL_CORRECTION_ENABLE
+	  static float lateral_offset_cm = 0.0f;   // dead-reckoned perpendicular drift from the original line
+#endif
 
 	  /*
 	   * Straight speed-profile state. luther
@@ -3252,6 +3280,9 @@ void motorTask(void const * argument)
 		straight_steer_i_percent = 0.0f;
 		straight_steer_d_percent = 0.0f;
 		straight_steer_correction_percent = 0.0f;
+#if STRAIGHT_LATERAL_CORRECTION_ENABLE
+		lateral_offset_cm = 0.0f; // new segment, new line -- forget any prior drift
+#endif
 
 		// Do NOT compute da/db or update odometers this tick
 	  }

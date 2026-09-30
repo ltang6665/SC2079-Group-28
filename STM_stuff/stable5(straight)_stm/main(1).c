@@ -228,7 +228,7 @@ volatile int32_t target_counts = 0; // +ve forward, -ve reverse
 #define PWM_INNER 6000
 
 //luther direction higher value = slower
-#define FWD_LEFT_COMPARE_SCALE   1.140f // was 1.160 - WPI telemetry showed the wheel PI needed more left drive (lower compare), not less
+#define FWD_LEFT_COMPARE_SCALE   1.160f
 #define FWD_RIGHT_COMPARE_SCALE  1.000f
 
 /* Starting values only — tune from telemetry. */
@@ -249,12 +249,11 @@ volatile int32_t target_counts = 0; // +ve forward, -ve reverse
  *     Keeping this above zero reduces the chance of stalling before
  *     reaching target_counts.
  */
-#define STRAIGHT_ACCEL_RAMP_MS        350U //was 400
-#define STRAIGHT_DECEL_CM             14.0f // was 7.0. The quadratic zone is (DECEL_CM - TERMINAL_CM); at 7/5 it was only 2 cm (~45 ms), i.e. a step. 14/5 gives 9 cm (~0.25 s)
+#define STRAIGHT_ACCEL_RAMP_MS        500U
+#define STRAIGHT_DECEL_CM             20.0f
 #define STRAIGHT_DECEL_MIN_PERCENT    20.0f
 #define STRAIGHT_TERMINAL_CM          5.0f
 #define STRAIGHT_TERMINAL_MIN_PERCENT 15.0f
-#define STRAIGHT_DECEL_EXPONENT  2.0f   // shape of the 100%->MIN ramp: 2.0 = quadratic, zero slope at the START (gentle), steepest at the end. 1.0 = linear
 
 // left side consistenly geenrates the jerk , cruise speed is good
 #define FWD_LAUNCH_TRIM_MS                700U
@@ -326,8 +325,8 @@ volatile turn_t cmd_turn = TURN_NONE;
 
 // luther CCR
 #define SERVO_CENTER_CCR 152            // straight (you already use ~152) /155
-#define SERVO_CENTER_AFTERLEFT_CCR 163  // latest value supplied by user (best value -> 163, around -1.2 error from 0 with fixed servo)
-#define SERVO_CENTER_AFTERRIGHT_CCR 150 // DO NOT CHANGE, 150 IS BEST (+2.2 error)
+#define SERVO_CENTER_AFTERLEFT_CCR 164  // latest value supplied by user
+#define SERVO_CENTER_AFTERRIGHT_CCR 151 // DO NOT CHANGE, 151 IS BEST
 #define SERVO_RIGHT_CCR 240             // <-- set to your "forward-right" CCR 250
 #define SERVO_LEFT_CCR 110              // <-- set to your "forward-left"  CCR 107
 #define SERVO_REVERSE_LEFT_CCR 110      // 112
@@ -336,45 +335,28 @@ volatile turn_t cmd_turn = TURN_NONE;
 #define TURN_SERVO_ONLY_TEST       0 // for testing
 #define TURN_SERVO_TEST_HOLD_MS    10000U //how long to hold the turn for
 
-#define SPEED_LPF_TAU 0.05f // 50 ms time constant for the controller's encoder-speed filter
+#define SPEED_LPF_TAU 0.05f // ~0.2 s LPF for encoder speed
 
 #define SERVO_HOME_RIGHT_CCR              SERVO_RIGHT_CCR // direction to lock before straightening
 #define SERVO_HOME_LEFT_CCR               SERVO_LEFT_CCR // for testing
 #define STEERING_HOME_BRAKE_SETTLE_MS     50U // allows brake state to establish before steering moves
-#define STEERING_HOME_END_HOLD_MS         600U //Time to hold the steering on the right
+#define STEERING_HOME_END_HOLD_MS       600U //Time to hold the steering on the right
 #define STEERING_HOME_CENTER_SETTLE_MS    500U //Time to allow the steering/linkage to settle
 
 /* Straight-line heading hold. These values act on the steering servo only;
  * wheel-speed PI remains responsible for balancing encoder speeds. */
-#define STRAIGHT_STEER_DEADBAND_DEG         0.01f
-#define STRAIGHT_STEER_MIN_PERCENT          0.01f
-#define STRAIGHT_STEER_MAX_PERCENT          40.0f
-#define STRAIGHT_STEER_KP_PERCENT_PER_DEG   15.0f // 29.2 first PID test only used ~15% of the 70% ceiling for a <1 deg error, plenty of headroom to push harder
-#define STRAIGHT_STEER_KI_PERCENT_PER_DEG_S 3.30f   // 1 was 0.02176 (effectively zero: <0.03% servo authority over a whole run). Sweep 5 -> 8 -> 12 from telemetry
-#define STRAIGHT_STEER_KD_PERCENT_PER_DPS   0.50f  // 2.5 408 confirmed by your F200_with_updated_params telemetry: heading now oscillates cleanly through zero
-#define STRAIGHT_STEER_I_LIMIT_PERCENT      20.0f // clamp on the integral contribution (anti-windup)
-#define STRAIGHT_STEER_SLEW_PERCENT_PER_S  90000.0f // max %/s the commanded correction may change (smooths servo motion)
-#define STRAIGHT_STEER_D_LPF_TAU_S 0.050f // low pass filter tau value, higher value --> stronger filtering
+#define STRAIGHT_STEER_KP_PERCENT_PER_DEG  10.0f
+#define STRAIGHT_STEER_DEADBAND_DEG        0.10f
+#define STRAIGHT_STEER_MIN_PERCENT         5.0f
+#define STRAIGHT_STEER_MAX_PERCENT        70.0f
 
+/* Diagnostic only: 0 keeps the current controller; 1 holds a fixed servo
+ * command during finite scripted FORWARD moves, with wheel PI still active.
+ * Start at offset 0. Do not tune other parameters during this A/B test. */
+#define STRAIGHT_DIAG_FIXED_SERVO          1 // disable steering correction
+#define STRAIGHT_DIAG_OFFSET_CCR           0
 
-/* Integrator gating: only learn the steering bias while cruising, never during
- * launch or decel, and never while the heading error is large (avoids winding
- * up on the launch transient). */
-#define STRAIGHT_STEER_I_MIN_DRIVE_PERCENT  60.0f // integrate only when the drive profile is at/above this level
-#define STRAIGHT_STEER_I_ERR_BAND_DEG        2.0f // ...and only while |heading error| is below this
-
-/* Steering behaviour once planned deceleration begins.
- * 0 = heading PID keeps running through the decel (previous behaviour).
- * 1 = PID corrections (P and D) are dropped at decel start; the servo HOLDS the
- *     learned bias trim (the integral term) so the car keeps its straight line
- *     without reacting to gyro noise / the decel disturbance. Integrator is frozen. */
-#define STRAIGHT_DECEL_STEER_HOLD           0
-
-// diagnostic flags
-#define STRAIGHT_DIAG_FIXED_SERVO          0 // 0 = full PID steering active (recommended); 1 = bypass, for A/B testing only
-#define STRAIGHT_DIAG_OFFSET_CCR           0 // ccr offset
-#define WHEEL_PI_DIAG_DISABLE 			   0   // 0 = normal (recommended), 1 = force off=0 for isolation testing; off_f/err/i_acc still computed & logged
-#define STEERING_DIAG_HOME_FROM_LEFT       0 // enable after left ccr
+#define STEERING_DIAG_HOME_FROM_LEFT       1 // enable after left ccr
 
 #if STRAIGHT_DIAG_FIXED_SERVO != 0 && STRAIGHT_DIAG_FIXED_SERVO != 1
 #error "STRAIGHT_DIAG_FIXED_SERVO must be 0 or 1"
@@ -426,13 +408,6 @@ volatile int straight_servo_ccr = SERVO_CENTER_CCR;
 volatile int straight_servo_center_ccr = SERVO_CENTER_CCR;
 static volatile uint8_t steering_homed = 0U;
 volatile float straight_steer_percent = 0.0f; // Actual physical steering request: negative = left, positive = right,  units = percent of available servo travel
-
-volatile float straight_steer_p_percent = 0.0f;
-volatile float straight_steer_i_percent = 0.0f;
-volatile float straight_steer_d_percent = 0.0f;
-volatile float straight_steer_correction_percent = 0.0f;
-
-
 
 static float turn_i_error_deg_s = 0.0f;
 static uint32_t turn_pid_last_tick = 0U;
@@ -606,7 +581,6 @@ static inline void motor_reverse(void)
 
 static inline void motor_brake(void) // both high -> fast brake (your previous "stop")
 {
-  Telemetry_ClearWheelPi(); // Discard the pre-brake controller snapshot.
   __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, PWM_MAX);
   __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, PWM_MAX);
 
@@ -1704,12 +1678,6 @@ int main(void)
 
   Telemetry_Init(&huart2);
 
-  Telemetry_SetStraightPidGains(
-      STRAIGHT_STEER_KP_PERCENT_PER_DEG,
-      STRAIGHT_STEER_KI_PERCENT_PER_DEG_S,
-      STRAIGHT_STEER_KD_PERCENT_PER_DPS
-  );
-
   if (reset_cause_flags & RCC_CSR_IWDGRSTF)
     Telemetry_RecordFault("BOOT_IWDG");
   else if (reset_cause_flags & RCC_CSR_WWDGRSTF)
@@ -2687,8 +2655,8 @@ void oledTask(void const * argument)
     {
       OLED_ShowString(0, 0, (uint8_t *)"GYRO NOT READY  ");
       OLED_ShowString(0, 16, (uint8_t *)"MOTION DISABLED ");
-      OLED_ShowString(0, 32, (uint8_t *)"AUTO RETRY...   ");
-      OLED_ShowString(0, 48, (uint8_t *)"KEEP CAR STILL  ");
+      OLED_ShowString(0, 32, (uint8_t *)"CHECK I2C/POWER ");
+      OLED_ShowString(0, 48, (uint8_t *)"POWER CYCLE CAR ");
       OLED_Refresh_Gram();
       osDelay(20);
       continue;
@@ -2914,9 +2882,9 @@ void motorTask(void const * argument)
 	{
 	  // ====== Tunables (keep Ki small if no anti-windup) ======
 	  //          const int   base_pwm = PWM_RUN;     // e.g., 4000
-	  const float Kp = 0.250f; // 0.05, test — up from 0.003; current value is nearly pure-I
-	  const float Ki = 0.010f; // 0.003        // start smaller without anti-windup
-	  const float Kd = 0.010f; // 0.001
+	  const float Kp = 0.003f; // 0.05
+	  const float Ki = 0.003f; // 0.003        // start smaller without anti-windup
+	  const float Kd = 0.000f; // 0.001
 
 	  // best run kp=0.3, ki=0.003, kd=0.001
 	  // new best run kp = 0.003, ki = 0.003, kd = 0
@@ -2925,11 +2893,6 @@ void motorTask(void const * argument)
 	  static int32_t prev_err = 0;
 	  static float cpsA_f = 0.0f;
 	  static float cpsB_f = 0.0f;
-	  static float steer_i_acc_deg_s = 0.0f;   // heading-hold PID integral accumulator (deg*s)
-	  static float steer_last_percent = 0.0f;  // previous commanded correction %, for slew-rate limiting
-	  static bool  steer_hold_latched = false;   // true once decel has started and the servo trim is latched
-	  static float steer_hold_percent = 0.0f;    // latched servo correction (integral trim) held through decel
-	  static float steer_d_rate_f = 0.0f;
 
 	  /*
 	   * Straight speed-profile state. luther
@@ -3197,10 +3160,6 @@ void motorTask(void const * argument)
 	      straight_servo_ccr = current_center_ccr;
 	      straight_servo_center_ccr = current_center_ccr;
 	      straight_steer_percent = 0.0f;
-	      straight_steer_p_percent = 0.0f;
-	      straight_steer_i_percent = 0.0f;
-	      straight_steer_d_percent = 0.0f;
-	      straight_steer_correction_percent = 0.0f;
 
 	      straight_telemetry_until_tick =
 	          HAL_GetTick() + STRAIGHT_POST_STOP_TELEMETRY_MS;
@@ -3242,16 +3201,6 @@ void motorTask(void const * argument)
 		// optional: also clear PID transients to avoid a kick
 		i_acc = 0;
 		prev_err = 0;
-		steer_i_acc_deg_s = 0.0f;
-		steer_last_percent = 0.0f;
-		steer_hold_latched = false;
-		steer_hold_percent = 0.0f;
-		steer_d_rate_f = 0.0f;
-
-		straight_steer_p_percent = 0.0f;
-		straight_steer_i_percent = 0.0f;
-		straight_steer_d_percent = 0.0f;
-		straight_steer_correction_percent = 0.0f;
 
 		// Do NOT compute da/db or update odometers this tick
 	  }
@@ -3308,7 +3257,7 @@ void motorTask(void const * argument)
 	  int32_t err = speed_err;
 
 	  i_acc += err;
-	  const int32_t IACC_CLAMP = 40000; // was 25000 - old clamp was pinning the wheel PI's integral for 27-42% of every run
+	  const int32_t IACC_CLAMP = 25000;
 	  if (i_acc > IACC_CLAMP)
 		i_acc = IACC_CLAMP;
 	  if (i_acc < -IACC_CLAMP)
@@ -3318,13 +3267,8 @@ void motorTask(void const * argument)
 	  prev_err = err;
 
 	  float off_f = Kp * (float)err + Ki * (float)i_acc + Kd * (float)d;
-		#if WHEEL_PI_DIAG_DISABLE
-		  int off = 0;              // suppressed; off_f/err/i_acc still logged above
-		#else
-		  int off = (int)off_f;
-		#endif
+	  int off = (int)off_f;
 	  //int off = 0;
-
 
 	  /*
 	   * Select the same calibrated full-speed compare used by scripted F/R.
@@ -3358,7 +3302,6 @@ void motorTask(void const * argument)
 		  target_counts != (INT32_MIN + 1);
 
 	  float profile_target = requested_percent;
-	  bool decel_active = false; // true while inside the planned-deceleration zone (used by the steering block)
 
 	  if (finite_scripted_move)
 	  {
@@ -3371,7 +3314,6 @@ void motorTask(void const * argument)
 
 		  if ((float)remaining_counts < decel_counts)
 		  {
-		      decel_active = true;
 		      const float remaining =
 		          (float)remaining_counts;
 
@@ -3433,16 +3375,11 @@ void motorTask(void const * argument)
 		          if (decel_fraction > 1.0f)
 		              decel_fraction = 1.0f;
 
-		          /* decel_fraction: 1.0 at the start of the zone -> 0.0 at the terminal zone.
-		           * progress = 0 at the start -> 1 at the end. Ramp = 100 - (100-MIN)*progress^N,
-		           * so N=2 starts with ZERO slope (gentle) and steepens toward the end.
-		           * (The old form MIN + (100-MIN)*fraction^N was steepest at the START.) */
-		          const float decel_progress = 1.0f - decel_fraction;
-
 		          decel_percent =
-		              100.0f -
-		              (100.0f - STRAIGHT_DECEL_MIN_PERCENT) *
-		              powf(decel_progress, STRAIGHT_DECEL_EXPONENT);
+		              STRAIGHT_DECEL_MIN_PERCENT +
+		              (100.0f -
+		               STRAIGHT_DECEL_MIN_PERCENT) *
+		              decel_fraction;
 		      }
 
 		      if (remaining <= terminal_counts)
@@ -3585,47 +3522,8 @@ void motorTask(void const * argument)
 	  straight_left_pwm = lDuty;
 	  straight_right_pwm = rDuty;
 
-#if STRAIGHT_LATERAL_CORRECTION_ENABLE
-	  /*
-	   * Dead-reckon perpendicular drift using this tick's average wheel
-	   * distance and the heading error relative to the ORIGINAL line
-	   * (target_angle, not yet trimmed). Small-angle approximation
-	   * (sin(x) ~= x in radians) is fine here: straight-line heading
-	   * error stays within a few degrees by design of the PID above.
-	   */
-	  {
-		  const float d_avg_cm = ((float)da + (float)db) * 0.5f / COUNTS_PER_CM;
-		  const float heading_err_rad =
-			  (total_angle - target_angle) * 0.0174532925f; // deg -> rad (M_PI/180), avoids relying on M_PI
-
-		  lateral_offset_cm += d_avg_cm * heading_err_rad;
-	  }
-
-	  /*
-	   * Convert lateral drift into a small heading-target trim: if we've
-	   * drifted to one side, aim slightly back toward the original line
-	   * rather than merely holding the (now offset) parallel heading.
-	   */
-	  float lateral_trim_deg =
-		  -STRAIGHT_LATERAL_KP_DEG_PER_CM * lateral_offset_cm;
-
-	  if (lateral_trim_deg > STRAIGHT_LATERAL_TRIM_MAX_DEG)
-	  {
-		  lateral_trim_deg = STRAIGHT_LATERAL_TRIM_MAX_DEG;
-	  }
-	  else if (lateral_trim_deg < -STRAIGHT_LATERAL_TRIM_MAX_DEG)
-	  {
-		  lateral_trim_deg = -STRAIGHT_LATERAL_TRIM_MAX_DEG;
-	  }
-
-	  const float effective_target_angle = target_angle + lateral_trim_deg;
-
-	  // Hold the (possibly trimmed) heading for THIS straight segment.
-	  error_angle = effective_target_angle - total_angle;
-#else
 	  // Hold the heading captured at the start of THIS straight segment.
 	  error_angle = target_angle - total_angle;
-#endif
 
 	  /* =========================================================
 	   * Straight-line gyro heading correction
@@ -3640,97 +3538,11 @@ void motorTask(void const * argument)
 	  }
 
 	  /*
-	   * Heading-hold PID, computed as a percentage of available
-	   * steering travel rather than raw CCR counts.
-	   *
-	   * P alone cannot fully cancel a persistent yaw bias (uneven
-	   * friction, motor mismatch beyond what the wheel PI corrects,
-	   * mechanical misalignment): a P-only loop settles at whatever
-	   * non-zero error produces the output needed to hold yaw rate at
-	   * zero, so the robot drives straight but at a small constant
-	   * angle offset from the intended heading. The integral term
-	   * below removes that residual offset over time.
-	   *
-	   * The derivative term uses the gyro's own measured yaw RATE
-	   * rather than differencing the (noisier) integrated angle:
-	   * d(error)/dt = -d(total_angle)/dt = -gyro_yaw_rate_dps.
+	   * First calculate controller output as a percentage of
+	   * available steering travel rather than raw CCR counts.
 	   */
-	  const bool steer_i_enabled =
-		  !decel_active &&
-		  drive_profile_percent >= STRAIGHT_STEER_I_MIN_DRIVE_PERCENT &&
-		  fabsf(steering_error) < STRAIGHT_STEER_I_ERR_BAND_DEG;
-
-	  /*
-	   * Integral controller + anti-windup.
-	   *
-	   * Ki may intentionally be set to zero while tuning.
-	   * Do not divide by Ki when it is disabled.
-	   */
-	  if (STRAIGHT_STEER_KI_PERCENT_PER_DEG_S > 0.0f)
-	  {
-	      if (steer_i_enabled)
-	      {
-	          steer_i_acc_deg_s += steering_error * dt_s;
-	      }
-
-	      const float i_limit_deg_s =
-	          STRAIGHT_STEER_I_LIMIT_PERCENT /
-	          STRAIGHT_STEER_KI_PERCENT_PER_DEG_S;
-
-	      if (steer_i_acc_deg_s > i_limit_deg_s)
-	      {
-	          steer_i_acc_deg_s = i_limit_deg_s;
-	      }
-	      else if (steer_i_acc_deg_s < -i_limit_deg_s)
-	      {
-	          steer_i_acc_deg_s = -i_limit_deg_s;
-	      }
-	  }
-	  else
-	  {
-	      /*
-	       * Ki is disabled.
-	       * Keep the accumulator clean so enabling Ki later
-	       * cannot suddenly apply an old accumulated error.
-	       */
-	      steer_i_acc_deg_s = 0.0f;
-	  }
-
-	  const float steer_p_term = STRAIGHT_STEER_KP_PERCENT_PER_DEG * steering_error;
-	  const float steer_i_term = STRAIGHT_STEER_KI_PERCENT_PER_DEG_S * steer_i_acc_deg_s;
-	  /*
-	   * Low-pass filter the gyro yaw rate used by the derivative term.
-	   *
-	   * This keeps real chassis rotation but rejects much of the
-	   * high-frequency gyro/vibration noise that D would otherwise amplify.
-	   */
-	  const float d_alpha =
-	      dt_s / (STRAIGHT_STEER_D_LPF_TAU_S + dt_s);
-
-	  steer_d_rate_f +=
-	      d_alpha * (gyro_yaw_rate_dps - steer_d_rate_f);
-
-	  const float steer_d_term =
-	      -STRAIGHT_STEER_KD_PERCENT_PER_DPS * steer_d_rate_f;
-
-	  float correction_percent = steer_p_term + steer_i_term + steer_d_term;
-
-#if STRAIGHT_DECEL_STEER_HOLD
-	  /* Planned decel: stop reacting, hold the learned bias trim (I term) only. */
-	  if (decel_active)
-	  {
-		  if (!steer_hold_latched)
-		  {
-			  steer_hold_latched = true;
-			  steer_hold_percent = steer_i_term;
-		  }
-		  correction_percent = steer_hold_percent;
-	  }
-	  else
-	  {
-		  steer_hold_latched = false;
-	  }
-#endif
+	  float correction_percent =
+		  STRAIGHT_STEER_KP_PERCENT_PER_DEG * steering_error;
 
 	  /*
 	   * Once outside the deadband, make sure the servo moves enough
@@ -3754,49 +3566,6 @@ void motorTask(void const * argument)
 	  {
 		  correction_percent = -STRAIGHT_STEER_MAX_PERCENT;
 	  }
-
-	  /*
-	   * Slew-rate limit the commanded correction so the servo moves
-	   * smoothly instead of jumping between values on every ~10 ms
-	   * tick, which otherwise shows up as a wiggling/oscillating line.
-	   */
-	  {
-		  const float max_step_percent = STRAIGHT_STEER_SLEW_PERCENT_PER_S * dt_s;
-
-		  if (correction_percent > steer_last_percent + max_step_percent)
-		  {
-			  correction_percent = steer_last_percent + max_step_percent;
-		  }
-		  else if (correction_percent < steer_last_percent - max_step_percent)
-		  {
-			  correction_percent = steer_last_percent - max_step_percent;
-		  }
-	  }
-
-	  steer_last_percent = correction_percent;
-
-	  /*
-	   * Save exact PID/controller values for telemetry.
-	   *
-	   * P/I/D are the raw PID contributions.
-	   *
-	   * correction_percent is the FINAL controller-domain request after:
-	   * - decel hold
-	   * - minimum output
-	   * - output clamping
-	   * - slew limiting
-	   */
-	  straight_steer_p_percent =
-	      steer_p_term;
-
-	  straight_steer_i_percent =
-	      steer_i_term;
-
-	  straight_steer_d_percent =
-	      steer_d_term;
-
-	  straight_steer_correction_percent =
-	      correction_percent;
 
 	  /*
 	   * Convert yaw correction into physical steering direction.
@@ -4055,16 +3824,6 @@ void motorTask(void const * argument)
 	   // __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_2, rDuty * 1.025); // 0.940
 		__HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_2, rDuty); // test
 
-	  }
-
-	  /* Capture exactly the PI state used above. UART work stays in EncoderTask. */
-	  if (slide_mode == SLIDE_NONE &&
-	      (uart_cmd == CMD_FORWARD || uart_cmd == CMD_REVERSE))
-	  {
-	      Telemetry_PublishWheelPi(
-	          t, dt_ms, cpsA_f, cpsB_f, speed_err,
-	          i_acc, IACC_CLAMP, off, throttle_percent, lDuty, rDuty
-	      );
 	  }
 
 	  break;
@@ -4352,26 +4111,12 @@ void encoderTask(void const * argument)
 				    target_angle,
 				    gyro_yaw_rate_dps,
 				    error_angle,
-
-				    straight_steer_p_percent,
-				    straight_steer_i_percent,
-				    straight_steer_d_percent,
-				    straight_steer_correction_percent,
-
 				    straight_servo_ccr,
 				    straight_servo_center_ccr,
 				    straight_steer_percent,
-
 				    straight_left_pwm,
 				    straight_right_pwm,
-
 				    straight_telemetry_active
-				);
-
-				/* WPI is diagnostic only; exclude slides and post-stop STR records. */
-				Telemetry_SendWheelPi(
-				    ((uart_cmd == CMD_FORWARD || uart_cmd == CMD_REVERSE) &&
-				     slide_mode == SLIDE_NONE) ? 1U : 0U
 				);
 			  }
 //    if ((HAL_GetTick() - last_tick) >= 1000U) // 1 s window
