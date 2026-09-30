@@ -360,7 +360,8 @@ volatile turn_t cmd_turn = TURN_NONE;
 /* Integrator gating: only learn the steering bias while cruising, never during
  * launch or decel, and never while the heading error is large (avoids winding
  * up on the launch transient). */
-#define STRAIGHT_STEER_I_MIN_DRIVE_PERCENT  60.0f // integrate only when the drive profile is at/above this level
+#define STRAIGHT_STEER_I_GATING_ENABLE 		 1
+#define STRAIGHT_STEER_I_MIN_DRIVE_PERCENT   60.0f // integrate only when the drive profile is at/above this level
 #define STRAIGHT_STEER_I_ERR_BAND_DEG        2.0f // ...and only while |heading error| is below this
 
 /* Steering behaviour once planned deceleration begins.
@@ -3585,47 +3586,8 @@ void motorTask(void const * argument)
 	  straight_left_pwm = lDuty;
 	  straight_right_pwm = rDuty;
 
-#if STRAIGHT_LATERAL_CORRECTION_ENABLE
-	  /*
-	   * Dead-reckon perpendicular drift using this tick's average wheel
-	   * distance and the heading error relative to the ORIGINAL line
-	   * (target_angle, not yet trimmed). Small-angle approximation
-	   * (sin(x) ~= x in radians) is fine here: straight-line heading
-	   * error stays within a few degrees by design of the PID above.
-	   */
-	  {
-		  const float d_avg_cm = ((float)da + (float)db) * 0.5f / COUNTS_PER_CM;
-		  const float heading_err_rad =
-			  (total_angle - target_angle) * 0.0174532925f; // deg -> rad (M_PI/180), avoids relying on M_PI
-
-		  lateral_offset_cm += d_avg_cm * heading_err_rad;
-	  }
-
-	  /*
-	   * Convert lateral drift into a small heading-target trim: if we've
-	   * drifted to one side, aim slightly back toward the original line
-	   * rather than merely holding the (now offset) parallel heading.
-	   */
-	  float lateral_trim_deg =
-		  -STRAIGHT_LATERAL_KP_DEG_PER_CM * lateral_offset_cm;
-
-	  if (lateral_trim_deg > STRAIGHT_LATERAL_TRIM_MAX_DEG)
-	  {
-		  lateral_trim_deg = STRAIGHT_LATERAL_TRIM_MAX_DEG;
-	  }
-	  else if (lateral_trim_deg < -STRAIGHT_LATERAL_TRIM_MAX_DEG)
-	  {
-		  lateral_trim_deg = -STRAIGHT_LATERAL_TRIM_MAX_DEG;
-	  }
-
-	  const float effective_target_angle = target_angle + lateral_trim_deg;
-
-	  // Hold the (possibly trimmed) heading for THIS straight segment.
-	  error_angle = effective_target_angle - total_angle;
-#else
 	  // Hold the heading captured at the start of THIS straight segment.
 	  error_angle = target_angle - total_angle;
-#endif
 
 	  /* =========================================================
 	   * Straight-line gyro heading correction
@@ -3655,10 +3617,19 @@ void motorTask(void const * argument)
 	   * rather than differencing the (noisier) integrated angle:
 	   * d(error)/dt = -d(total_angle)/dt = -gyro_yaw_rate_dps.
 	   */
-	  const bool steer_i_enabled =
-		  !decel_active &&
-		  drive_profile_percent >= STRAIGHT_STEER_I_MIN_DRIVE_PERCENT &&
-		  fabsf(steering_error) < STRAIGHT_STEER_I_ERR_BAND_DEG;
+		#if STRAIGHT_STEER_I_GATING_ENABLE
+
+		const bool steer_i_enabled =
+			!decel_active &&
+			drive_profile_percent >= STRAIGHT_STEER_I_MIN_DRIVE_PERCENT &&
+			fabsf(steering_error) < STRAIGHT_STEER_I_ERR_BAND_DEG;
+
+		#else
+
+		/* Allow the integrator to learn throughout the whole straight movement. */
+		const bool steer_i_enabled = true;
+
+		#endif
 
 	  /*
 	   * Integral controller + anti-windup.
