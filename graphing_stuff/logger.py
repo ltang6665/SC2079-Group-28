@@ -61,6 +61,14 @@ CSV_FIELDS = [
     "wheel_pi_i_limit",
     "wheel_pi_off",
     "drive_percent",
+    "steer_kp",
+    "steer_ki",
+    "steer_kd",
+
+    "steer_p_percent",
+    "steer_i_percent",
+    "steer_d_percent",
+    "steer_corr_percent",
 ]
 
 
@@ -136,6 +144,28 @@ def decode_line(
             )
             return row, reset
 
+        # SPID,tick,id,kp*1000,ki*1000,kd*1000
+        if kind == "SPID" and len(parts) == 6:
+            tick = int(parts[1])
+
+            session_id, reset = tracker.observe(tick)
+
+            row = empty_record()
+
+            row.update(
+                host_time=time.time(),
+                session_id=session_id,
+                record_type="SPID",
+                stm_tick_ms=tick,
+                command_id=int(parts[2]),
+
+                steer_kp=scaled_angle(parts[3]),
+                steer_ki=scaled_angle(parts[4]),
+                steer_kd=scaled_angle(parts[5]),
+            )
+
+            return row, reset
+
         # Original: ENC,tick,id,a,b
         # Extended: ENC,tick,id,a,b,dt_ms
         if kind == "ENC" and len(parts) in (5, 6):
@@ -187,25 +217,48 @@ def decode_line(
         # STR,tick,id,yaw,target,rate,error,
         #     servo,center,steer_percent,left_pwm,right_pwm
 
-        if kind == "STR" and len(parts) in (10, 12):
+        if kind == "STR" and len(parts) in (10, 12, 16):
             tick = int(parts[1])
             session_id, reset = tracker.observe(tick)
 
             row = empty_record()
 
-            servo_ccr = int(parts[7])
+            p_term = ""
+            i_term = ""
+            d_term = ""
+            correction = ""
 
-            if len(parts) == 12:
-                # New telemetry format
+            if len(parts) == 16:
+                # New PID-aware telemetry format
+                p_term = scaled_angle(parts[7])
+                i_term = scaled_angle(parts[8])
+                d_term = scaled_angle(parts[9])
+                correction = scaled_angle(parts[10])
+
+                servo_ccr = int(parts[11])
+                servo_center = int(parts[12])
+                steer_percent = scaled_angle(parts[13])
+
+                left_pwm = int(parts[14])
+                right_pwm = int(parts[15])
+
+                servo_offset = servo_ccr - servo_center
+
+            elif len(parts) == 12:
+                # Previous telemetry format
+                servo_ccr = int(parts[7])
                 servo_center = int(parts[8])
                 steer_percent = scaled_angle(parts[9])
+
                 left_pwm = int(parts[10])
                 right_pwm = int(parts[11])
 
                 servo_offset = servo_ccr - servo_center
 
             else:
-                # Old telemetry format compatibility
+                # Original telemetry format
+                servo_ccr = int(parts[7])
+
                 servo_center = ""
                 servo_offset = ""
                 steer_percent = ""
@@ -219,14 +272,22 @@ def decode_line(
                 record_type="STR",
                 stm_tick_ms=tick,
                 command_id=int(parts[2]),
+
                 yaw_deg=scaled_angle(parts[3]),
                 target_deg=scaled_angle(parts[4]),
                 yaw_rate_dps=scaled_angle(parts[5]),
                 turn_error_deg=scaled_angle(parts[6]),
+
+                steer_p_percent=p_term,
+                steer_i_percent=i_term,
+                steer_d_percent=d_term,
+                steer_corr_percent=correction,
+
                 servo_ccr=servo_ccr,
                 servo_center_ccr=servo_center,
                 servo_offset_ccr=servo_offset,
                 steer_cmd_percent=steer_percent,
+
                 left_pwm=left_pwm,
                 right_pwm=right_pwm,
             )

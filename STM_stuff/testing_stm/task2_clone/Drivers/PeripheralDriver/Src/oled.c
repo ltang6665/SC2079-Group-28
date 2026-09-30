@@ -35,7 +35,7 @@ void OLED_WR_Byte(uint8_t dat,uint8_t cmd)
 		dat<<=1;   
 	}				 		  
 	OLED_RS_Set();   	  
-} 
+ }
 
 /**************************************************************************
 Clear OLED

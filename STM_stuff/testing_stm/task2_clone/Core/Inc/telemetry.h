@@ -7,6 +7,9 @@
 void Telemetry_Init(UART_HandleTypeDef *uart);
 void Telemetry_StartCommand(const char *command_name, int value);
 
+/* Configure the straight-heading PID gains that are attached to each command. */
+void Telemetry_SetStraightPidGains(float kp, float ki, float kd);
+
 /* Records a fault for EncoderTask to transmit; safe to call from another task. */
 void Telemetry_RecordFault(const char *fault_code);
 
@@ -47,6 +50,10 @@ void Telemetry_SendStraight(
     float target_deg,
     float yaw_rate_dps,
     float error_deg,
+    float steer_p_percent,
+    float steer_i_percent,
+    float steer_d_percent,
+    float steer_correction_percent,
     int servo_ccr,
     int servo_center_ccr,
     float steer_percent,
@@ -54,5 +61,4 @@ void Telemetry_SendStraight(
     int right_pwm,
     uint8_t straight_active
 );
-
 #endif /* INC_TELEMETRY_H_ */

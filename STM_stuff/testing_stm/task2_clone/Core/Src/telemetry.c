@@ -20,6 +20,14 @@ static volatile uint8_t fault_pending = 0;
 static volatile uint32_t pending_fault_tick = 0;
 static char pending_fault_code[TELEMETRY_FAULT_CODE_LEN];
 
+/* Straight-heading PID configuration. The gains are configured once from
+ * main.c, then one SPID record is attached to every new command ID. */
+static volatile float straight_pid_kp = 0.0f;
+static volatile float straight_pid_ki = 0.0f;
+static volatile float straight_pid_kd = 0.0f;
+
+static volatile uint8_t straight_pid_configured = 0U;
+
 /* One coherent controller update, not unrelated globals sampled at different times. */
 typedef struct
 {
@@ -78,8 +86,31 @@ void Telemetry_Init(UART_HandleTypeDef *uart)
     wheel_pi_valid = 0U;
     wheel_pi_sent = 0U;
     wheel_pi_last_send_tick = 0U;
+
+    straight_pid_kp = 0.0f;
+    straight_pid_ki = 0.0f;
+    straight_pid_kd = 0.0f;
+
+    straight_pid_configured = 0U;
 }
 
+void Telemetry_SetStraightPidGains(float kp,float ki,float kd)
+{
+    const uint32_t primask = __get_PRIMASK();
+
+    __disable_irq();
+
+    straight_pid_kp = kp;
+    straight_pid_ki = ki;
+    straight_pid_kd = kd;
+
+    straight_pid_configured = 1U;
+
+    if (primask == 0U)
+    {
+        __enable_irq();
+    }
+}
 
 void Telemetry_StartCommand(const char *command_name, int value)
 {
@@ -101,6 +132,7 @@ void Telemetry_StartCommand(const char *command_name, int value)
     wheel_pi_valid = 0U;
     wheel_pi_sent = 0U;
     pending_command_tick = HAL_GetTick();
+
     pending_command_value = value;
     memcpy(pending_command_name, temp_name, sizeof(pending_command_name));
     command_pending = 1U;
@@ -224,13 +256,23 @@ void Telemetry_SendEncoder(
 )
 {
     uint32_t command_id;
+
     uint8_t send_command = 0U;
     uint8_t send_fault = 0U;
+    uint8_t pid_configured = 0U;
+
     uint32_t command_tick = 0U;
     uint32_t fault_tick = 0U;
+
     int command_value = 0;
+
+    float pid_kp = 0.0f;
+    float pid_ki = 0.0f;
+    float pid_kd = 0.0f;
+
     char command_name[TELEMETRY_COMMAND_NAME_LEN] = {0};
     char fault_code[TELEMETRY_FAULT_CODE_LEN] = {0};
+
     uint32_t primask;
 
     if (telemetry_uart == NULL)
@@ -238,6 +280,9 @@ void Telemetry_SendEncoder(
         return;
     }
 
+    /*
+     * Copy shared state while interrupts are briefly disabled.
+     */
     primask = __get_PRIMASK();
     __disable_irq();
 
@@ -246,9 +291,26 @@ void Telemetry_SendEncoder(
     if (command_pending)
     {
         send_command = 1U;
+
         command_tick = pending_command_tick;
         command_value = pending_command_value;
-        memcpy(command_name, pending_command_name, sizeof(command_name));
+
+        memcpy(
+            command_name,
+            pending_command_name,
+            sizeof(command_name)
+        );
+
+        /*
+         * Take a snapshot of the PID gains belonging to
+         * this command.
+         */
+        pid_configured = straight_pid_configured;
+
+        pid_kp = straight_pid_kp;
+        pid_ki = straight_pid_ki;
+        pid_kd = straight_pid_kd;
+
         command_pending = 0U;
     }
 
@@ -256,7 +318,13 @@ void Telemetry_SendEncoder(
     {
         send_fault = 1U;
         fault_tick = pending_fault_tick;
-        memcpy(fault_code, pending_fault_code, sizeof(fault_code));
+
+        memcpy(
+            fault_code,
+            pending_fault_code,
+            sizeof(fault_code)
+        );
+
         fault_pending = 0U;
     }
 
@@ -265,49 +333,122 @@ void Telemetry_SendEncoder(
         __enable_irq();
     }
 
+    /*
+     * Existing command telemetry.
+     */
     if (send_command)
     {
         char buffer[64];
+
         int length = snprintf(
             buffer,
             sizeof(buffer),
+
             "CMD,%lu,%lu,%s:%d\r\n",
+
             (unsigned long)command_id,
             (unsigned long)command_tick,
             command_name,
             command_value
         );
-        transmit_line(buffer, sizeof(buffer), length);
+
+        transmit_line(
+            buffer,
+            sizeof(buffer),
+            length
+        );
     }
 
-    if (send_fault)
+    /*
+     * Send the PID gains once for the new command.
+     *
+     * Example:
+     * SPID,52341,7,29200,0,2000
+     *
+     * means:
+     * Kp = 29.2
+     * Ki = 0.0
+     * Kd = 2.0
+     */
+    if (send_command && pid_configured)
     {
-        char buffer[64];
+        char buffer[96];
+
         int length = snprintf(
             buffer,
             sizeof(buffer),
+
+            "SPID,%lu,%lu,%ld,%ld,%ld\r\n",
+
+            (unsigned long)command_tick,
+            (unsigned long)command_id,
+
+            (long)scale_by_1000(pid_kp),
+            (long)scale_by_1000(pid_ki),
+            (long)scale_by_1000(pid_kd)
+        );
+
+        transmit_line(
+            buffer,
+            sizeof(buffer),
+            length
+        );
+    }
+
+    /*
+     * Existing fault telemetry.
+     */
+    if (send_fault)
+    {
+        char buffer[64];
+
+        int length = snprintf(
+            buffer,
+            sizeof(buffer),
+
             "FLT,%lu,%lu,%s\r\n",
+
             (unsigned long)fault_tick,
             (unsigned long)command_id,
             fault_code
         );
-        transmit_line(buffer, sizeof(buffer), length);
+
+        transmit_line(
+            buffer,
+            sizeof(buffer),
+            length
+        );
     }
 
+    /*
+     * Existing encoder telemetry.
+     */
     {
-        uint32_t sample_command_id = command_active ? command_id : 0U;
+        uint32_t sample_command_id =
+            command_active ? command_id : 0U;
+
         char buffer[72];
+
         int length = snprintf(
             buffer,
             sizeof(buffer),
+
             "ENC,%lu,%lu,%d,%d,%u\r\n",
+
             (unsigned long)HAL_GetTick(),
             (unsigned long)sample_command_id,
+
             (int)motor_a,
             (int)motor_b,
+
             (unsigned int)sample_dt_ms
         );
-        transmit_line(buffer, sizeof(buffer), length);
+
+        transmit_line(
+            buffer,
+            sizeof(buffer),
+            length
+        );
     }
 }
 
@@ -366,27 +507,39 @@ void Telemetry_SendStraight(
     float target_deg,
     float yaw_rate_dps,
     float error_deg,
+
+    float steer_p_percent,
+    float steer_i_percent,
+    float steer_d_percent,
+    float steer_correction_percent,
+
     int servo_ccr,
     int servo_center_ccr,
     float steer_percent,
+
     int left_pwm,
     int right_pwm,
+
     uint8_t straight_active
 )
 {
     uint32_t command_id;
     uint32_t primask;
-    char buffer[144];
+
+    char buffer[208];
     int length;
 
-    if (telemetry_uart == NULL || !straight_active)
+    if (telemetry_uart == NULL ||
+        !straight_active)
     {
         return;
     }
 
     primask = __get_PRIMASK();
     __disable_irq();
+
     command_id = current_command_id;
+
     if (primask == 0U)
     {
         __enable_irq();
@@ -395,18 +548,36 @@ void Telemetry_SendStraight(
     length = snprintf(
         buffer,
         sizeof(buffer),
-        "STR,%lu,%lu,%ld,%ld,%ld,%ld,%d,%d,%ld,%d,%d\r\n",
+
+        "STR,%lu,%lu,"
+        "%ld,%ld,%ld,%ld,"
+        "%ld,%ld,%ld,%ld,"
+        "%d,%d,%ld,%d,%d\r\n",
+
         (unsigned long)HAL_GetTick(),
         (unsigned long)command_id,
+
         (long)scale_by_1000(yaw_deg),
         (long)scale_by_1000(target_deg),
         (long)scale_by_1000(yaw_rate_dps),
         (long)scale_by_1000(error_deg),
+        (long)scale_by_1000(steer_p_percent),
+        (long)scale_by_1000(steer_i_percent),
+        (long)scale_by_1000(steer_d_percent),
+        (long)scale_by_1000(steer_correction_percent),
+
         servo_ccr,
         servo_center_ccr,
+
         (long)scale_by_1000(steer_percent),
+
         left_pwm,
         right_pwm
     );
-    transmit_line(buffer, sizeof(buffer), length);
+
+    transmit_line(
+        buffer,
+        sizeof(buffer),
+        length
+    );
 }
