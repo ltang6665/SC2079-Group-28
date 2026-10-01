@@ -333,13 +333,6 @@ volatile turn_t cmd_turn = TURN_NONE;
 #define SERVO_REVERSE_LEFT_CCR 110      // 112
 #define SERVO_REVERSE_RIGHT_CCR 240
 
-/* Straight-line centre used while REVERSING, chosen by which side the steering
- * last came from (same idea as the forward AFTERLEFT/AFTERRIGHT values).
- * Defaults equal the forward values, so behaviour is unchanged until you
- * measure reverse-specific centres (see STRAIGHT_DIAG_FIXED_SERVO_REVERSE). */
-#define SERVO_REV_CENTER_AFTERLEFT_CCR  SERVO_CENTER_AFTERLEFT_CCR
-#define SERVO_REV_CENTER_AFTERRIGHT_CCR 151
-
 #define TURN_SERVO_ONLY_TEST       0 // for testing
 #define TURN_SERVO_TEST_HOLD_MS    10000U //how long to hold the turn for
 
@@ -356,31 +349,9 @@ volatile turn_t cmd_turn = TURN_NONE;
 #define STRAIGHT_STEER_DEADBAND_DEG         0.01f
 #define STRAIGHT_STEER_MIN_PERCENT          0.01f
 #define STRAIGHT_STEER_MAX_PERCENT          40.0f
-/* ---- Direction-specific heading-hold gains (gain scheduling) --------------
- * One PID implementation, two gain sets chosen by direction of travel.
- * FORWARD = your known-good values (unchanged).
- * REVERSE = starting point only: lower Kp, Ki OFF. Tune one value at a time:
- *   1) get a stable PD response (raise/lower REV Kp, then REV Kd),
- *   2) only then bring REV Ki up from 0 if a constant heading offset remains. */
-#define FWD_STEER_KP_PERCENT_PER_DEG   24.0f // 29.2 first PID test only used ~15% of the 70% ceiling for a <1 deg error, plenty of headroom to push harder
-#define FWD_STEER_KI_PERCENT_PER_DEG_S 5.00f   // 1 was 0.02176 (effectively zero: <0.03% servo authority over a whole run). Sweep 5 -> 8 -> 12 from telemetry
-#define FWD_STEER_KD_PERCENT_PER_DPS   1.00f  // 2.5 408 confirmed by your F200_with_updated_params telemetry: heading now oscillates cleanly through zero
-
-#define REV_STEER_KP_PERCENT_PER_DEG   22.0f // starting guess, not a calculated value - tune from r200 telemetry
-#define REV_STEER_KI_PERCENT_PER_DEG_S 3.00f // keep 0 until reverse is stable with PD only
-#define REV_STEER_KD_PERCENT_PER_DPS   1.00f // keep equal to forward for the first comparison
-
-/* How a steering percentage is converted into servo CCR counts.
- *   0 = original behaviour: percent is scaled by the travel available on the
- *       side being requested (centre->left or centre->right). With centre 150,
- *       left 110, right 240 that is 40 vs 90 counts, so the same % gives very
- *       different CCR changes on each side.
- *   1 = symmetric: both sides use the SMALLER of the two spans, so +x% and -x%
- *       give the same CCR change from centre.
- * Forward keeps 0 so your tuned forward behaviour does not change. */
-#define FWD_STEER_SYMMETRIC_MAP 0
-#define REV_STEER_SYMMETRIC_MAP 0
-
+#define STRAIGHT_STEER_KP_PERCENT_PER_DEG   24.0f // 29.2 first PID test only used ~15% of the 70% ceiling for a <1 deg error, plenty of headroom to push harder
+#define STRAIGHT_STEER_KI_PERCENT_PER_DEG_S 5.00f   // 1 was 0.02176 (effectively zero: <0.03% servo authority over a whole run). Sweep 5 -> 8 -> 12 from telemetry
+#define STRAIGHT_STEER_KD_PERCENT_PER_DPS   1.00f  // 2.5 408 confirmed by your F200_with_updated_params telemetry: heading now oscillates cleanly through zero
 #define STRAIGHT_STEER_I_LIMIT_PERCENT      20.0f // clamp on the integral contribution (anti-windup)
 #define STRAIGHT_STEER_SLEW_PERCENT_PER_S  90000.0f // max %/s the commanded correction may change (smooths servo motion)
 #define STRAIGHT_STEER_D_LPF_TAU_S 0.050f // low pass filter tau value, higher value --> stronger filtering
@@ -403,15 +374,11 @@ volatile turn_t cmd_turn = TURN_NONE;
 // diagnostic flags
 #define STRAIGHT_DIAG_FIXED_SERVO          0 // 0 = full PID steering active (recommended); 1 = bypass, for A/B testing only
 #define STRAIGHT_DIAG_OFFSET_CCR           0 // ccr offset
-#define STRAIGHT_DIAG_FIXED_SERVO_REVERSE  0 // 1 = the fixed-servo diagnostic also applies to reverse (use to calibrate SERVO_REV_CENTER_*)
 #define WHEEL_PI_DIAG_DISABLE 			   0   // 0 = normal (recommended), 1 = force off=0 for isolation testing; off_f/err/i_acc still computed & logged
 #define STEERING_DIAG_HOME_FROM_LEFT       0 // enable after left ccr
 
 #if STRAIGHT_DIAG_FIXED_SERVO != 0 && STRAIGHT_DIAG_FIXED_SERVO != 1
 #error "STRAIGHT_DIAG_FIXED_SERVO must be 0 or 1"
-#endif
-#if STRAIGHT_DIAG_FIXED_SERVO_REVERSE != 0 && STRAIGHT_DIAG_FIXED_SERVO_REVERSE != 1
-#error "STRAIGHT_DIAG_FIXED_SERVO_REVERSE must be 0 or 1"
 #endif
 #if STRAIGHT_DIAG_OFFSET_CCR < -6 || STRAIGHT_DIAG_OFFSET_CCR > 6
 #error "Keep the diagnostic steering offset within -6 to +6 CCR"
@@ -690,29 +657,16 @@ static inline void set_servo_reverse_right(void) { htim12.Instance->CCR2 = SERVO
 static inline void set_servo_left(void) { htim12.Instance->CCR2 = SERVO_LEFT_CCR; }
 static inline void set_servo_reverse_left(void) { htim12.Instance->CCR2 = SERVO_REVERSE_LEFT_CCR; }
 
-/* 1 = steering last returned to centre from the left, 0 = from the right
- * (also the power-up default, matching homing from the right). */
-static volatile uint8_t center_came_from_left = 0U;
-
 static inline void set_servo_center_afterleft(void)
 {
-    center_came_from_left = 1U;
     current_center_ccr = SERVO_CENTER_AFTERLEFT_CCR;
     htim12.Instance->CCR2 = current_center_ccr;
 }
 
 static inline void set_servo_center_afterright(void)
 {
-    center_came_from_left = 0U;
     current_center_ccr = SERVO_CENTER_AFTERRIGHT_CCR;
     htim12.Instance->CCR2 = current_center_ccr;
-}
-
-/* Centre for reverse straight-line steering. */
-static inline int reverse_center_ccr(void)
-{
-    return center_came_from_left ? SERVO_REV_CENTER_AFTERLEFT_CCR
-                                 : SERVO_REV_CENTER_AFTERRIGHT_CCR;
 }
 
 // luther startup steering homing from either direction
@@ -1406,21 +1360,6 @@ static int start_next_from_queue(void)
 
 	if (telemetry_name != NULL)
 	{
-		/* EncoderTask snapshots the gains for the SPID line as soon as it sees
-		 * the new command, so the gains for THIS command must be set first. */
-		if (it.type == SCMD_REV_CM)
-		{
-			Telemetry_SetStraightPidGains(REV_STEER_KP_PERCENT_PER_DEG,
-										  REV_STEER_KI_PERCENT_PER_DEG_S,
-										  REV_STEER_KD_PERCENT_PER_DPS);
-		}
-		else
-		{
-			Telemetry_SetStraightPidGains(FWD_STEER_KP_PERCENT_PER_DEG,
-										  FWD_STEER_KI_PERCENT_PER_DEG_S,
-										  FWD_STEER_KD_PERCENT_PER_DPS);
-		}
-
 		Telemetry_StartCommand(telemetry_name, it.value);
 	}
 
@@ -1767,9 +1706,9 @@ int main(void)
   Telemetry_Init(&huart2);
 
   Telemetry_SetStraightPidGains(
-      FWD_STEER_KP_PERCENT_PER_DEG,
-      FWD_STEER_KI_PERCENT_PER_DEG_S,
-      FWD_STEER_KD_PERCENT_PER_DPS
+      STRAIGHT_STEER_KP_PERCENT_PER_DEG,
+      STRAIGHT_STEER_KI_PERCENT_PER_DEG_S,
+      STRAIGHT_STEER_KD_PERCENT_PER_DPS
   );
 
   if (reset_cause_flags & RCC_CSR_IWDGRSTF)
@@ -3693,23 +3632,12 @@ void motorTask(void const * argument)
 		#endif
 
 	  /*
-	   * Gain scheduling: pick the gain set for the current direction of travel.
-	   * The PID maths below is identical for both directions.
-	   */
-	  const float steer_kp = is_reverse ? REV_STEER_KP_PERCENT_PER_DEG
-											: FWD_STEER_KP_PERCENT_PER_DEG;
-	  const float steer_ki = is_reverse ? REV_STEER_KI_PERCENT_PER_DEG_S
-											: FWD_STEER_KI_PERCENT_PER_DEG_S;
-	  const float steer_kd = is_reverse ? REV_STEER_KD_PERCENT_PER_DPS
-											: FWD_STEER_KD_PERCENT_PER_DPS;
-
-	  /*
 	   * Integral controller + anti-windup.
 	   *
 	   * Ki may intentionally be set to zero while tuning.
 	   * Do not divide by Ki when it is disabled.
 	   */
-	  if (steer_ki > 0.0f)
+	  if (STRAIGHT_STEER_KI_PERCENT_PER_DEG_S > 0.0f)
 	  {
 	      if (steer_i_enabled)
 	      {
@@ -3718,7 +3646,7 @@ void motorTask(void const * argument)
 
 	      const float i_limit_deg_s =
 	          STRAIGHT_STEER_I_LIMIT_PERCENT /
-	          steer_ki;
+	          STRAIGHT_STEER_KI_PERCENT_PER_DEG_S;
 
 	      if (steer_i_acc_deg_s > i_limit_deg_s)
 	      {
@@ -3739,8 +3667,8 @@ void motorTask(void const * argument)
 	      steer_i_acc_deg_s = 0.0f;
 	  }
 
-	  const float steer_p_term = steer_kp * steering_error;
-	  const float steer_i_term = steer_ki * steer_i_acc_deg_s;
+	  const float steer_p_term = STRAIGHT_STEER_KP_PERCENT_PER_DEG * steering_error;
+	  const float steer_i_term = STRAIGHT_STEER_KI_PERCENT_PER_DEG_S * steer_i_acc_deg_s;
 	  /*
 	   * Low-pass filter the gyro yaw rate used by the derivative term.
 	   *
@@ -3754,7 +3682,7 @@ void motorTask(void const * argument)
 	      d_alpha * (gyro_yaw_rate_dps - steer_d_rate_f);
 
 	  const float steer_d_term =
-	      -steer_kd * steer_d_rate_f;
+	      -STRAIGHT_STEER_KD_PERCENT_PER_DPS * steer_d_rate_f;
 
 	  float correction_percent = steer_p_term + steer_i_term + steer_d_term;
 
@@ -3860,9 +3788,8 @@ void motorTask(void const * argument)
 		  physical_steer_percent = correction_percent;
 	  }
 
-	  /* Use the calibrated centre for this direction of travel. */
-	  int center = is_reverse ? reverse_center_ccr()
-							  : (int)current_center_ccr;
+	  /* Use the current calibrated centre. */
+	  int center = (int)current_center_ccr;
 
 	  /*
 	   * Use the appropriate steering endpoints for the direction
@@ -3884,25 +3811,10 @@ void motorTask(void const * argument)
 
 	  int servo = center;
 
-	  /*
-	   * Travel available on each side of centre. With the symmetric map
-	   * enabled for this direction, both sides use the smaller span so that
-	   * +x% and -x% produce the same CCR change from centre.
-	   */
-	  float right_span = (float)(right_limit - center);
-	  float left_span  = (float)(center - left_limit);
-
-	  if (is_reverse ? REV_STEER_SYMMETRIC_MAP : FWD_STEER_SYMMETRIC_MAP)
-	  {
-		  const float sym_span = (right_span < left_span) ? right_span : left_span;
-		  right_span = sym_span;
-		  left_span  = sym_span;
-	  }
-
 	  if (physical_steer_percent > 0.0f)
 	  {
 		  /* RIGHT steering */
-		  float available = right_span;
+		  float available = (float)(right_limit - center);
 
 		  servo = center +
 			  (int)lroundf(
@@ -3914,7 +3826,7 @@ void motorTask(void const * argument)
 	  else if (physical_steer_percent < 0.0f)
 	  {
 		  /* LEFT steering */
-		  float available = left_span;
+		  float available = (float)(center - left_limit);
 
 		  servo = center +
 			  (int)lroundf(
@@ -3926,7 +3838,7 @@ void motorTask(void const * argument)
 
 	  /* BEGIN STRAIGHT FIXED-STEERING DIAGNOSTIC */
 #if STRAIGHT_DIAG_FIXED_SERVO
-	  if (finite_scripted_move && (!is_reverse || STRAIGHT_DIAG_FIXED_SERVO_REVERSE) && slide_mode == SLIDE_NONE)
+	  if (finite_scripted_move && !is_reverse && slide_mode == SLIDE_NONE)
 	  {
 		  servo = center + STRAIGHT_DIAG_OFFSET_CCR;
 		  if (servo < left_limit) servo = left_limit;

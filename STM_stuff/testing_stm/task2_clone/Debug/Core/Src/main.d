@@ -49,7 +49,7 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
  ../Middlewares/Third_Party/FreeRTOS/Source/include/queue.h \
  ../Middlewares/Third_Party/FreeRTOS/Source/include/event_groups.h \
  ../Middlewares/Third_Party/FreeRTOS/Source/include/timers.h \
- C:/Users/luther\ tang/Desktop/VSC\ files/SC2079-Group-28/STM_stuff/testing_stm/task2_clone/Drivers/PeripheralDriver/Inc/oled.h \
+ C:/Users/Luther/Documents/VScode/SC2079_MDP_grp_28/SC2079-Group-28/STM_stuff/testing_stm/task2_clone/Drivers/PeripheralDriver/Inc/oled.h \
  ../Core/Inc/telemetry.h ../Core/Inc/main.h ../Core/Inc/manual_control.h \
  ../Core/Inc/gyro_safe.h
 ../Core/Inc/main.h:
@@ -103,7 +103,7 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
 ../Middlewares/Third_Party/FreeRTOS/Source/include/queue.h:
 ../Middlewares/Third_Party/FreeRTOS/Source/include/event_groups.h:
 ../Middlewares/Third_Party/FreeRTOS/Source/include/timers.h:
-C:/Users/luther\ tang/Desktop/VSC\ files/SC2079-Group-28/STM_stuff/testing_stm/task2_clone/Drivers/PeripheralDriver/Inc/oled.h:
+C:/Users/Luther/Documents/VScode/SC2079_MDP_grp_28/SC2079-Group-28/STM_stuff/testing_stm/task2_clone/Drivers/PeripheralDriver/Inc/oled.h:
 ../Core/Inc/telemetry.h:
 ../Core/Inc/main.h:
 ../Core/Inc/manual_control.h:
