@@ -16,8 +16,6 @@ import com.example.android_app.R
 import com.example.android_app.bluetooth.BluetoothService
 import com.example.android_app.bluetooth.Protocol
 import com.example.android_app.others.setupConnectionStatusBar
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class ArenaActivity : AppCompatActivity() {
@@ -25,27 +23,11 @@ class ArenaActivity : AppCompatActivity() {
     private lateinit var arena: ArenaView
     private lateinit var status: TextView
     private lateinit var statusScroll: ScrollView // for auto scrolling of status log
-    private lateinit var btnCalculate: Button
-    private lateinit var btnStart: Button
 
     var compiledObstacles = mutableListOf<Obstacle>()
 
-    // Calculate/Start state. PATHREADY carries no id, so only one CALCULATE
-    // is allowed in flight at a time to know which calculation it answers.
-    private var calcInFlight = false  // CALCULATE sent, PATHREADY not received yet
-    private var awaitingPath = false  // in-flight result is still wanted (no edits/reset since)
-    private var pathArmed = false     // latest path is ready and matches the arena
-    // BEGIN sent. The RPi then ignores CALCULATE and a second BEGIN would restart
-    // it from segment 1, so both buttons stay locked until the link drops
-    // (restarting task1.py drops it). If the link only blipped, the RPi still
-    // ignores CALCULATE, so no PATHREADY comes back and Start can't re-arm.
-    private var runStarted = false
-    private var calcTimeoutJob: Job? = null
-
     companion object {
         private const val TAG = "ArenaActivity12345"
-        // Give up waiting for PATHREADY after this long (should exceed the PC's slowest path calculation)
-        private const val CALC_TIMEOUT_MS = 30_000L
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -56,14 +38,10 @@ class ArenaActivity : AppCompatActivity() {
         arena = findViewById(R.id.arenaView)
         status = findViewById(R.id.statusText)
         statusScroll = findViewById(R.id.statusScroll)
-        btnCalculate = findViewById(R.id.btnCalculate)
-        btnStart = findViewById(R.id.btnStart)
 
         wireArenaCallbacks()
         wireControls()
-        updateRunButtons()
         observeMessages()
-        observeConnection()
 
         appendStatus(getString(R.string.status_ready))
     }
@@ -73,7 +51,7 @@ class ArenaActivity : AppCompatActivity() {
             Log.d(TAG, "Callback [onObstaclePlaced]")
             // BluetoothService.send(Protocol.obstacle(obs.id, obs.cellX, obs.cellY))
             appendStatus("Placed obstacle ${obs.id} at (${obs.cellX},${obs.cellY})")
-            invalidatePath()
+
         }
 
         /*arena.onObstacleMoved = { obs ->
@@ -85,14 +63,12 @@ class ArenaActivity : AppCompatActivity() {
             // BluetoothService.send(Protocol.obstacle(obs.id, obs.cellX, obs.cellY))
             addToCompiled(obs, "dropped")
             appendStatus("Dropped obstacle ${obs.id} at (${obs.cellX},${obs.cellY})")
-            invalidatePath()
         }
         arena.onObstacleRemoved = { obs ->
             Log.d(TAG, "Callback [onObstacleRemoved]")
             // BluetoothService.send(Protocol.obstacleDeleted(obs.id, obs.cellX, obs.cellY))
             addToCompiled(obs, "remove")
             appendStatus("Removed obstacle ${obs.id}")
-            invalidatePath()
         }
         arena.onObstacleLongPress = { obs ->
             Log.d(TAG, "Callback [onObstacleLongPress]")
@@ -134,118 +110,58 @@ class ArenaActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnStop).setOnClickListener {
             sendMove(Protocol.MoveCmd.STOP, "Stop")
         }
-        // Calculate: send the obstacle list, then ask the RPi to compute a path.
-        // The RPi replies PATHREADY when done (see handleInbound).
-        btnCalculate.setOnClickListener {
-            // isEnabled alone doesn't stop a queued double tap
-            if (calcInFlight || runStarted) return@setOnClickListener
-            // The old path is being replaced, so Start waits for the new PATHREADY
-            pathArmed = false
-            // all{} stops at the first failed send (i.e. not connected)
-            val sent = compiledObstacles.all { obs -> sendObstacle(obs) } &&
-                    BluetoothService.send(Protocol.calc())
+        findViewById<Button>(R.id.btnCalculate).setOnClickListener {
+            compiledObstacles.forEach { obs ->
+                val face = obs.face
+                if (face != null) {
+                    BluetoothService.send(Protocol.face(obs.id, obs.cellX, obs.cellY, face))
+                } else {
+                    BluetoothService.send(Protocol.obstacle(obs.id, obs.cellX, obs.cellY))
+                }
+            }
 
-            if (sent) {
+            if (BluetoothService.send(Protocol.calc())) {
+                appendStatus("Starting to calculate path")
+
+                Log.d(TAG, "Attempting to send obstacles individually...")
+
+                /*Log.d(TAG, "Obstacles sent (${compiledObstacles.size}): " +
+                        compiledObstacles.joinToString { "id=${it.id} (${it.cellX},${it.cellY}) face=${it.face}" })*/
+
+            } else {
+                appendStatus("CALCULATE failed — not connected")
+                Log.d(TAG, "Going to send the list of obstacles")
+
+                Log.d(TAG, "Attempting to send obstacles individually...")
+
+                compiledObstacles.forEach { obs ->
+                    val face = obs.face
+                    if (face != null) {
+                        BluetoothService.send(Protocol.face(obs.id, obs.cellX, obs.cellY, face))
+                    } else {
+                        BluetoothService.send(Protocol.obstacle(obs.id, obs.cellX, obs.cellY))
+                    }
+                }
                 Log.d(TAG, "Obstacles sent (${compiledObstacles.size}): " +
                         compiledObstacles.joinToString { "id=${it.id} (${it.cellX},${it.cellY}) face=${it.face}" })
-                calcInFlight = true
-                awaitingPath = true
-                startCalcTimeout()
-                appendStatus("Sent ${compiledObstacles.size} obstacle(s), calculating path...")
-            } else {
-                awaitingPath = false
-                appendStatus("CALCULATE failed — not connected")
+
             }
-            updateRunButtons()
         }
-        // Start: tell the RPi to run the calculated path
-        btnStart.setOnClickListener {
-            // isEnabled alone doesn't stop a queued double tap
-            if (!pathArmed || runStarted) return@setOnClickListener
+        findViewById<Button>(R.id.btnStart).setOnClickListener {
             if (BluetoothService.send(Protocol.start())) {
-                runStarted = true
-                pathArmed = false
-                appendStatus("Sent START — for another run, restart task1.py and reconnect")
+                appendStatus("Sent START")
             } else {
                 appendStatus("START failed — not connected")
             }
-            updateRunButtons()
         }
         findViewById<Button>(R.id.btnReset).setOnClickListener {
             arena.reset()
             compiledObstacles.clear()
-            // An in-flight calculation still answers later, so calcInFlight stays set
-            awaitingPath = false
-            pathArmed = false
-            updateRunButtons()
 
             if (BluetoothService.send(Protocol.reset())) {
                 appendStatus("Arena reset")
             } else {
                 appendStatus("RESET failed - not connected")
-            }
-        }
-    }
-
-    private fun sendObstacle(obs: Obstacle): Boolean {
-        val face = obs.face
-        return if (face != null) {
-            BluetoothService.send(Protocol.face(obs.id, obs.cellX, obs.cellY, face))
-        } else {
-            BluetoothService.send(Protocol.obstacle(obs.id, obs.cellX, obs.cellY))
-        }
-    }
-
-    private fun updateRunButtons() {
-        btnCalculate.isEnabled = !calcInFlight && !runStarted
-        btnStart.isEnabled = pathArmed && !runStarted
-    }
-
-    private fun recalcHint(): String =
-        if (calcInFlight) "press Calculate again once the current calculation finishes"
-        else "press Calculate again"
-
-    /** Obstacles changed since the last Calculate, so the RPi's path is stale. */
-    private fun invalidatePath() {
-        if (awaitingPath || pathArmed) {
-            awaitingPath = false
-            pathArmed = false
-            updateRunButtons()
-            appendStatus("Obstacles changed — ${recalcHint()}")
-        }
-    }
-
-    /**
-     * Link dropped. The RPi re-accepts the tablet on the same task1.py process, so a
-     * calculation in flight can still answer later: calcInFlight is kept (PATHREADY or
-     * the timeout clears it). A path armed before the drop isn't trusted anymore.
-     */
-    private fun onLinkLost() {
-        if (awaitingPath || pathArmed || runStarted) {
-            val wasStarted = runStarted
-            awaitingPath = false
-            pathArmed = false
-            runStarted = false
-            updateRunButtons()
-            if (wasStarted) {
-                appendStatus("Connection lost after START — restart task1.py before the next Calculate")
-            } else {
-                appendStatus("Connection lost — after reconnecting, ${recalcHint()}")
-            }
-        }
-    }
-
-    /** Release the Calculate lock if PATHREADY never comes (e.g. PC down, run already started). */
-    private fun startCalcTimeout() {
-        calcTimeoutJob?.cancel()
-        calcTimeoutJob = lifecycleScope.launch {
-            delay(CALC_TIMEOUT_MS)
-            if (calcInFlight) {
-                calcInFlight = false
-                awaitingPath = false
-                updateRunButtons()
-                appendStatus("No path from RPi after ${CALC_TIMEOUT_MS / 1000}s — check task1.py/PC " +
-                        "(restart task1.py if a run already started), then press Calculate")
             }
         }
     }
@@ -294,7 +210,6 @@ class ArenaActivity : AppCompatActivity() {
                 } else {
                     appendStatus("Obstacle ${obs.id} face cleared")
                 }
-                invalidatePath()
             }
             .show()
     }
@@ -312,17 +227,7 @@ class ArenaActivity : AppCompatActivity() {
                 appendStatus("Robot @ (${msg.x},${msg.y}) ${msg.facing.value}")
             }
             is Protocol.Inbound.Ready -> {
-                calcInFlight = false
-                calcTimeoutJob?.cancel()
-                if (awaitingPath && !runStarted) {
-                    pathArmed = true
-                    appendStatus("Path calculation ready! Press Start to run")
-                } else {
-                    // e.g. obstacles were edited or Reset pressed while calculating
-                    appendStatus("Path ready for outdated obstacles — press Calculate again")
-                }
-                awaitingPath = false
-                updateRunButtons()
+                appendStatus("Path calculation ready!")
             }
             is Protocol.Inbound.Unknown -> {
                 // Deliberately NOT logged to the visible status — checklist
@@ -347,21 +252,9 @@ class ArenaActivity : AppCompatActivity() {
 
     private fun observeMessages() {
         lifecycleScope.launch {
-            // CREATED (not STARTED) so a PATHREADY arriving while the app is in the
-            // background isn't dropped (messages has no replay) and Start can't get stuck
-            repeatOnLifecycle(Lifecycle.State.CREATED) {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
                 BluetoothService.messages.collect { line ->
                     handleInbound(line)
-                }
-            }
-        }
-    }
-
-    private fun observeConnection() {
-        lifecycleScope.launch {
-            repeatOnLifecycle(Lifecycle.State.CREATED) {
-                BluetoothService.state.collect { state ->
-                    if (state != BluetoothService.State.CONNECTED) onLinkLost()
                 }
             }
         }
