@@ -23,6 +23,7 @@ object Protocol {
     fun face(id: Int, x: Int, y: Int, dir: Facing): String = "OBSTACLE,$id,$x,$y,${dir.value}"
     fun move(cmd: MoveCmd): String = "ROBOT_MOVE,${cmd.token}"
     fun start(): String = "BEGIN"
+    fun calc(): String = "CALCULATE"
     fun reset(): String = "RESET"
 
     enum class MoveCmd(val token: Char) {
@@ -33,6 +34,7 @@ object Protocol {
     sealed interface Inbound {
         data class Target(val obstacleId: Int, val targetId: Int) : Inbound
         data class Robot(val x: Int, val y: Int, val facing: Facing) : Inbound
+        data object Ready : Inbound
         data class Unknown(val raw: String) : Inbound
     }
 
@@ -42,8 +44,11 @@ object Protocol {
      * anything we don't recognise so the caller can still log it.
      */
     fun parse(line: String): Inbound {
+        val trimmed = line.trim()
         val parts = line.split(",").map { it.trim() }
         return when {
+            trimmed.equals("PATHREADY", ignoreCase = true) -> Inbound.Ready
+
             parts.size == 3 && parts[0].equals("TARGET", ignoreCase = true) -> {
                 val obs = parts[1].toIntOrNull()
                 val tgt = parts[2].toIntOrNull()

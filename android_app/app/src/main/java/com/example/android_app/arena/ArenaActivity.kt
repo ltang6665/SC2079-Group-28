@@ -111,20 +111,24 @@ class ArenaActivity : AppCompatActivity() {
             sendMove(Protocol.MoveCmd.STOP, "Stop")
         }
         findViewById<Button>(R.id.btnStart).setOnClickListener {
-            if (BluetoothService.send(Protocol.start())) {
+            compiledObstacles.forEach { obs ->
+                val face = obs.face
+                if (face != null) {
+                    BluetoothService.send(Protocol.face(obs.id, obs.cellX, obs.cellY, face))
+                } else {
+                    BluetoothService.send(Protocol.obstacle(obs.id, obs.cellX, obs.cellY))
+                }
+            }
+
+            if (BluetoothService.send(Protocol.calc())) {
+                appendStatus("Starting to calculate path")
+
                 appendStatus("Sent START")
 
                 Log.d(TAG, "Attempting to send obstacles individually...")
-                compiledObstacles.forEach { obs ->
-                    val face = obs.face
-                    if (face != null) {
-                        BluetoothService.send(Protocol.face(obs.id, obs.cellX, obs.cellY, face))
-                    } else {
-                        BluetoothService.send(Protocol.obstacle(obs.id, obs.cellX, obs.cellY))
-                    }
-                }
-                Log.d(TAG, "Obstacles sent (${compiledObstacles.size}): " +
-                        compiledObstacles.joinToString { "id=${it.id} (${it.cellX},${it.cellY}) face=${it.face}" })
+
+                /*Log.d(TAG, "Obstacles sent (${compiledObstacles.size}): " +
+                        compiledObstacles.joinToString { "id=${it.id} (${it.cellX},${it.cellY}) face=${it.face}" })*/
 
             } else {
                 appendStatus("START failed — not connected")
@@ -217,9 +221,15 @@ class ArenaActivity : AppCompatActivity() {
                 // not every raw stream byte.
                 appendStatus("Robot @ (${msg.x},${msg.y}) ${msg.facing.value}")
             }
+            is Protocol.Inbound.Ready -> {
+                appendStatus("Path calculation ready!")
+                Protocol.start()
+            }
             is Protocol.Inbound.Unknown -> {
                 // Deliberately NOT logged to the visible status — checklist
                 // C.4 says the TextView should show selective info only.
+
+                appendStatus("RPi sent ${msg}")
             }
         }
     }
