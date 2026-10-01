@@ -126,7 +126,7 @@
                 android:layout_column="2" />
         </GridLayout>
 
-        <!-- Start & Reset Actions -->
+        <!-- Calculate & Start Actions -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -134,22 +134,30 @@
             android:orientation="horizontal">
 
             <Button
-                android:id="@+id/btnStart"
+                android:id="@+id/btnCalculate"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:contentDescription="Send start"
-                android:text="@string/btn_start_run" />
+                android:contentDescription="Calculate path"
+                android:text="@string/btn_calculate" />
 
             <Button
-                android:id="@+id/btnReset"
+                android:id="@+id/btnStart"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="8dp"
                 android:layout_weight="1"
-                android:contentDescription="Reset arena"
-                android:text="@string/btn_reset" />
+                android:contentDescription="Send start"
+                android:text="@string/btn_start_run" />
         </LinearLayout>
+
+        <!-- Reset Action -->
+        <Button
+            android:id="@+id/btnReset"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:contentDescription="Reset arena"
+            android:text="@string/btn_reset" />
 
         <!-- Console Log -->
         <TextView

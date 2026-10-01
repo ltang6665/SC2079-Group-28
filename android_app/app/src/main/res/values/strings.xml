@@ -13,6 +13,7 @@
     <string name="btn_left">◀</string>
     <string name="btn_right">▶</string>
     <string name="btn_stop">■</string>
+    <string name="btn_calculate">Calculate</string>
     <string name="btn_start_run">Start</string>
     <string name="status_idle">Idle</string>
     <string name="status_ready">Ready</string>

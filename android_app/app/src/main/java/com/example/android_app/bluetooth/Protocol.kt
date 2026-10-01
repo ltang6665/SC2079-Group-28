@@ -8,12 +8,14 @@ import com.example.android_app.arena.Facing
  * INBOUND (RPi -> Tablet):
  *   TARGET,<obstacle_number>,<target_id>          -> C.9  set target ID on obstacle
  *   ROBOT,<x>,<y>,<direction>                     -> C.10 update robot pose
+ *   PATHREADY                                     -> path calculated, ready to BEGIN
  * OUTBOUND (Tablet -> RPi):
  *   OBSTACLE,<num>,<x>,<y>                        -> C.6  obstacle placed / moved
  *   OBSTACLE_DEL,<num>                            -> C.6  obstacle dragged off map
  *   FACE,<num>,<direction>                        -> C.7  target face selected
  *   ROBOT_MOVE,<F|B|L|R|S>                        -> C.3  manual movement
- *   START
+ *   CALCULATE                                     -> Calculate button: compute path
+ *   BEGIN                                         -> Start button: run the path
  */
 object Protocol {
 
