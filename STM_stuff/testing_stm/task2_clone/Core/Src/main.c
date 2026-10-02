@@ -223,7 +223,7 @@ volatile int32_t target_counts = 0; // +ve forward, -ve reverse
 #define COUNTS_PER_CM ((float)ENC_CPR / WHEEL_CIRC_CM)
 
 #define PWM_MAX 7199
-#define PWM_RUN 3800 // your current "run" duty // used to be 4500, 4000, 3800
+#define PWM_RUN 2000 // your current "run" duty // used to be 4500, 4000, 3800
 #define PWM_MIN 6800
 #define PWM_INNER 6000
 
@@ -232,7 +232,7 @@ volatile int32_t target_counts = 0; // +ve forward, -ve reverse
 #define FWD_RIGHT_COMPARE_SCALE  1.000f
 
 /* Starting values only — tune from telemetry. */
-#define REV_LEFT_COMPARE_SCALE   0.980f
+#define REV_LEFT_COMPARE_SCALE   0.993f
 #define REV_RIGHT_COMPARE_SCALE  1.000f
 
 /*
@@ -249,12 +249,53 @@ volatile int32_t target_counts = 0; // +ve forward, -ve reverse
  *     Keeping this above zero reduces the chance of stalling before
  *     reaching target_counts.
  */
-#define STRAIGHT_ACCEL_RAMP_MS        350U //was 400
-#define STRAIGHT_DECEL_CM             7.0f // was 7.0. The quadratic zone is (DECEL_CM - TERMINAL_CM); at 7/5 it was only 2 cm (~45 ms), i.e. a step. 14/5 gives 9 cm (~0.25 s)
-#define STRAIGHT_DECEL_MIN_PERCENT    30.0f
-#define STRAIGHT_TERMINAL_CM          5.0f
-#define STRAIGHT_TERMINAL_MIN_PERCENT 15.0f
+#define STRAIGHT_ACCEL_START_PERCENT   20.0f
+#define STRAIGHT_ACCEL_EXPONENT         2.0f
+#define STRAIGHT_ACCEL_MAX_CM           3.0f
+#define STRAIGHT_DECEL_FRACTION       0.30f // 3800 pwm --> 10        used to calculate the total slowdown distacne relative to command
+#define STRAIGHT_DECEL_MIN_CM         8.0f // The quadratic zone is (DECEL_CM - TERMINAL_CM); at 7/5 it was only 2 cm (~45 ms), i.e. a step. 14/5 gives 9 cm (~0.25 s)
+#define STRAIGHT_DECEL_MIN_PERCENT    40.0f // 1st decel stage percentage of pwm
 #define STRAIGHT_DECEL_EXPONENT		  2.0f   // shape of the 100%->MIN ramp: 2.0 = quadratic, zero slope at the START (gentle), steepest at the end. 1.0 = linear
+#define STRAIGHT_TERMINAL_FRACTION    0.20f // decides how the slowdown zone is split between decel and terminal
+#define STRAIGHT_TERMINAL_MIN_PERCENT 5.0f // 3800pwm --> 15    pwm percentage to go to in terminal zone (2nd stage)
+#define STRAIGHT_TERMINAL_DECEL_EXPONENT 2.0f
+/*
+ * PRE-ALIGN:
+ * Extra portion of the whole command immediately BEFORE
+ * slowdown starts.
+ *
+ * 0.10 means:
+ *   F100 -> 10 cm pre-align
+ *
+ * With DECEL_FRACTION = 0.50:
+ *
+ *   0-?     accel
+ *   ?-40    cruise
+ *   40-50   pre-align
+ *   50-100  slowdown
+ */
+#define STRAIGHT_PREALIGN_EXTRA_FRACTION           0.10f
+
+// final heading-convergence zone
+
+/*
+ * At the END of the pre-align zone, multiply P and D by these amounts.
+ * The increase is gradual from 1.0 -> these values.
+ */
+#define STRAIGHT_STEER_PREALIGN_KP_MULT      1.20f
+#define STRAIGHT_STEER_PREALIGN_KD_MULT      1.20f
+
+/*
+ * Allow slightly more servo authority near the end.
+ *
+ * Normal:
+ *     max = 40%
+ *
+ * Immediately before decel:
+ *     max = 48%
+ */
+#define STRAIGHT_STEER_PREALIGN_MAX_PERCENT 48.0f
+
 
 // left side consistenly geenrates the jerk , cruise speed is good
 #define FWD_LAUNCH_TRIM_MS                400U
@@ -350,6 +391,7 @@ volatile turn_t cmd_turn = TURN_NONE;
 #define STEERING_HOME_BRAKE_SETTLE_MS     50U // allows brake state to establish before steering moves
 #define STEERING_HOME_END_HOLD_MS         600U //Time to hold the steering on the right
 #define STEERING_HOME_CENTER_SETTLE_MS    500U //Time to allow the steering/linkage to settle
+#define STRAIGHT_RECENTER_CCR_DEADBAND 1
 
 /* Straight-line heading hold. These values act on the steering servo only;
  * wheel-speed PI remains responsible for balancing encoder speeds. */
@@ -362,13 +404,13 @@ volatile turn_t cmd_turn = TURN_NONE;
  * REVERSE = starting point only: lower Kp, Ki OFF. Tune one value at a time:
  *   1) get a stable PD response (raise/lower REV Kp, then REV Kd),
  *   2) only then bring REV Ki up from 0 if a constant heading offset remains. */
-#define FWD_STEER_KP_PERCENT_PER_DEG   24.0f // 29.2 first PID test only used ~15% of the 70% ceiling for a <1 deg error, plenty of headroom to push harder
-#define FWD_STEER_KI_PERCENT_PER_DEG_S 5.00f   // 1 was 0.02176 (effectively zero: <0.03% servo authority over a whole run). Sweep 5 -> 8 -> 12 from telemetry
-#define FWD_STEER_KD_PERCENT_PER_DPS   1.00f  // 2.5 408 confirmed by your F200_with_updated_params telemetry: heading now oscillates cleanly through zero
+#define FWD_STEER_KP_PERCENT_PER_DEG   8.0f  // 3800 pwm --> 24       first PID test only used ~15% of the 70% ceiling for a <1 deg error, plenty of headroom to push harder
+#define FWD_STEER_KI_PERCENT_PER_DEG_S 1.50f // 3800 pwm --> 5      1 was 0.02176 (effectively zero: <0.03% servo authority over a whole run). Sweep 5 -> 8 -> 12 from telemetry
+#define FWD_STEER_KD_PERCENT_PER_DPS   1.00f // 3800 pwm --> 1       12.5 408 confirmed by your F200_with_updated_params telemetry: heading now oscillates cleanly through zero
 
-#define REV_STEER_KP_PERCENT_PER_DEG   22.0f // starting guess, not a calculated value - tune from r200 telemetry
-#define REV_STEER_KI_PERCENT_PER_DEG_S 3.00f // keep 0 until reverse is stable with PD only
-#define REV_STEER_KD_PERCENT_PER_DPS   1.00f // keep equal to forward for the first comparison
+#define REV_STEER_KP_PERCENT_PER_DEG   7.0f // 3800 pwm --> 22          starting guess, not a calculated value - tune from r200 telemetry
+#define REV_STEER_KI_PERCENT_PER_DEG_S 1.50f // 3800 pwm --> 3           keep 0 until reverse is stable with PD only
+#define REV_STEER_KD_PERCENT_PER_DPS   1.00f // 3800 pwm --> 1           keep equal to forward for the first comparison
 
 /* How a steering percentage is converted into servo CCR counts.
  *   0 = original behaviour: percent is scaled by the travel available on the
@@ -384,7 +426,6 @@ volatile turn_t cmd_turn = TURN_NONE;
 #define STRAIGHT_STEER_I_LIMIT_PERCENT      20.0f // clamp on the integral contribution (anti-windup)
 #define STRAIGHT_STEER_SLEW_PERCENT_PER_S  90000.0f // max %/s the commanded correction may change (smooths servo motion)
 #define STRAIGHT_STEER_D_LPF_TAU_S 0.050f // low pass filter tau value, higher value --> stronger filtering
-
 
 /* Integrator gating: only learn the steering bias while cruising, never during
  * launch or decel, and never while the heading error is large (avoids winding
@@ -747,6 +788,50 @@ static void home_steering(void)
     straight_steer_percent = 0.0f;
 
     steering_homed = 1U;
+}
+
+// RCENTERING after every straight
+static void recenter_after_straight(void)
+{
+	//
+    const int servo =
+        straight_servo_ccr;
+
+    const int center =
+        straight_servo_center_ccr;
+
+    if (servo < center - STRAIGHT_RECENTER_CCR_DEADBAND)
+    {
+        /*
+         * Steering was physically on the LEFT,
+         * so return to centre using the calibrated
+         * "came from left" centre.
+         */
+        set_servo_center_afterleft();
+    }
+    else if (servo > center + STRAIGHT_RECENTER_CCR_DEADBAND)
+    {
+        /*
+         * Steering was physically on the RIGHT.
+         */
+        set_servo_center_afterright();
+    }
+    else
+    {
+        /*
+         * Steering was essentially already centred.
+         * Don't unnecessarily change hysteresis state.
+         */
+        set_servo_center();
+    }
+
+    straight_servo_center_ccr =
+        current_center_ccr;
+
+    straight_servo_ccr =
+        current_center_ccr;
+
+    straight_steer_percent = 0.0f;
 }
 
 static inline int clamp_pwm_compare(int value)
@@ -3254,11 +3339,8 @@ void motorTask(void const * argument)
 	      straight_right_pwm = PWM_MAX;
 
 	      // return to the currently calibrated mechanical centre.
-	      set_servo_center();
+	      recenter_after_straight();
 
-	      straight_servo_ccr = current_center_ccr;
-	      straight_servo_center_ccr = current_center_ccr;
-	      straight_steer_percent = 0.0f;
 	      straight_steer_p_percent = 0.0f;
 	      straight_steer_i_percent = 0.0f;
 	      straight_steer_d_percent = 0.0f;
@@ -3420,18 +3502,203 @@ void motorTask(void const * argument)
 		  target_counts != (INT32_MIN + 1);
 
 	  float profile_target = requested_percent;
-	  bool decel_active = false; // true while inside the planned-deceleration zone (used by the steering block)
+	  bool decel_active = false;
+
+	  /*
+	   * Steering end-game information.
+	   *
+	   * prealign_progress:
+	   *   0.0 = just entered pre-align zone
+	   *   1.0 = just about to enter motor deceleration
+	   */
+	  bool prealign_active = false;
+	  float prealign_progress = 0.0f;
 
 	  if (finite_scripted_move)
 	  {
-		  // Two-stage planned deceleration, The robot therefore reaches motor_brake() at a much lower speeds
-		  const float decel_counts =
-		      STRAIGHT_DECEL_CM * COUNTS_PER_CM;
+	      /*
+	       * ============================================================
+	       * Distance-based end-of-command zones
+	       * ============================================================
+	       *
+	       * PREALIGN:
+	       *     Starts at a percentage of the whole command distance.
+	       *
+	       * DECEL:
+	       *     Starts at a smaller percentage of the whole command.
+	       *
+	       * TERMINAL:
+	       *     Remains a fixed physical distance from the target.
+	       */
 
-		  const float terminal_counts =
-		      STRAIGHT_TERMINAL_CM * COUNTS_PER_CM;
+	      const float total_command_counts =
+	          fabsf((float)target_counts);
 
-		  if ((float)remaining_counts < decel_counts)
+	      float moved_counts =
+	          total_command_counts -
+	          (float)remaining_counts;
+
+	      if (moved_counts < 0.0f)
+	      {
+	          moved_counts = 0.0f;
+	      }
+
+	      if (moved_counts > total_command_counts)
+	      {
+	          moved_counts = total_command_counts;
+	      }
+
+	      /* =========================================================
+	       * 1. SLOWDOWN REGION
+	       *
+	       * Final STRAIGHT_DECEL_FRACTION of the command.
+	       * ========================================================= */
+
+	      float decel_counts =
+	          total_command_counts *
+	          STRAIGHT_DECEL_FRACTION;
+
+	      /*
+	       * Short commands still get at least the minimum slowdown
+	       * distance.
+	       */
+	      const float decel_min_counts =
+	          STRAIGHT_DECEL_MIN_CM *
+	          COUNTS_PER_CM;
+
+	      if (decel_counts < decel_min_counts)
+	      {
+	          decel_counts = decel_min_counts;
+	      }
+
+	      /*
+	       * Slowdown can never be longer than the whole command.
+	       */
+	      if (decel_counts > total_command_counts)
+	      {
+	          decel_counts = total_command_counts;
+	      }
+
+
+	      /* =========================================================
+	       * 2. FRONT / PRE-DECEL REGION
+	       *
+	       * This is AUTOMATICALLY everything that is not slowdown.
+	       *
+	       * Equivalent conceptually to:
+	       *
+	       *     1.0 - STRAIGHT_DECEL_FRACTION
+	       *
+	       * But using subtraction from the actual clamped decel
+	       * distance also handles short commands correctly.
+	       * ========================================================= */
+
+	      const float predecel_counts =
+	          total_command_counts -
+	          decel_counts;
+
+
+	      /* =========================================================
+	       * 3. TERMINAL
+	       *
+	       * Terminal is INSIDE the slowdown region.
+	       * ========================================================= */
+
+	      const float terminal_counts =
+	          decel_counts *
+	          STRAIGHT_TERMINAL_FRACTION;
+
+			const float terminal_start_moved_counts =
+				total_command_counts -
+				terminal_counts;
+
+
+	      /* =========================================================
+	       * 4. PRE-ALIGN
+	       *
+	       * Pre-align occupies the END of the front region.
+	       * ========================================================= */
+
+	      float prealign_span_counts =
+	          total_command_counts *
+	          STRAIGHT_PREALIGN_EXTRA_FRACTION;
+
+	      /*
+	       * Do not allow pre-align to extend past the start
+	       * of the command.
+	       */
+	      if (prealign_span_counts > predecel_counts)
+	      {
+	          prealign_span_counts =
+	              predecel_counts;
+	      }
+
+	      /*
+	       * Encoder distance travelled when pre-align begins.
+	       */
+	      const float prealign_start_moved_counts =
+	          predecel_counts -
+	          prealign_span_counts;
+
+
+	      /* =========================================================
+	       * 5. ACCELERATION
+	       *
+	       * Use a physical maximum acceleration distance.
+	       *
+	       * Long commands:
+	       *     accel -> cruise -> prealign
+	       *
+	       * Short commands:
+	       *     acceleration is automatically shortened.
+	       * ========================================================= */
+
+	      float accel_counts =
+	          STRAIGHT_ACCEL_MAX_CM *
+	          COUNTS_PER_CM;
+
+	      /*
+	       * Acceleration must finish BEFORE pre-align begins.
+	       */
+	      if (accel_counts > prealign_start_moved_counts)
+	      {
+	          accel_counts =
+	              prealign_start_moved_counts;
+	      }
+
+	      if (accel_counts < 0.0f)
+	      {
+	          accel_counts = 0.0f;
+	      }
+
+
+	      /* =========================================================
+	       * 6. PRE-ALIGN ACTIVATION
+	       * ========================================================= */
+
+	      if (prealign_span_counts > 0.0f &&
+	          moved_counts >= prealign_start_moved_counts &&
+	          moved_counts < predecel_counts)
+	      {
+	          prealign_active = true;
+
+	          prealign_progress =
+	              (moved_counts -
+	               prealign_start_moved_counts) /
+	              prealign_span_counts;
+
+	          if (prealign_progress < 0.0f)
+	          {
+	              prealign_progress = 0.0f;
+	          }
+
+	          if (prealign_progress > 1.0f)
+	          {
+	              prealign_progress = 1.0f;
+	          }
+	      }
+
+	      if ((float)remaining_counts <= decel_counts)
 		  {
 		      decel_active = true;
 		      const float remaining =
@@ -3475,7 +3742,8 @@ void motorTask(void const * argument)
 		    	          terminal_floor_percent +
 		    	          (STRAIGHT_DECEL_MIN_PERCENT -
 		    	           terminal_floor_percent) *
-		    	          terminal_fraction;
+		    	          powf(terminal_fraction,
+		    	               STRAIGHT_TERMINAL_DECEL_EXPONENT);
 		      }
 		      else
 		      {
@@ -3517,39 +3785,73 @@ void motorTask(void const * argument)
 		      }
 		  }
 
-		  // non linear accel ramp
-		  // calcs amount of time elapsed since drive start
-		  uint32_t accel_elapsed_ms = profile_now - drive_profile_start_tick;
+	      /* =========================================================
+	       * Distance-based acceleration
+	       * ========================================================= */
 
-		  // calcs elapsed time as a percentage of the amount of time given to accel
-		  float accel_fraction = (float)accel_elapsed_ms / (float)STRAIGHT_ACCEL_RAMP_MS;
+	      float accel_limit_percent;
 
-		  //safety clamps
-		  if (accel_fraction < 0.0f)
-		  {
-		      accel_fraction = 0.0f;
-		  }
+	      if (accel_counts > 0.0f)
+	      {
+	          float accel_progress =
+	              moved_counts /
+	              accel_counts;
 
-		  if (accel_fraction > 1.0f)
-		  {
-		      accel_fraction = 1.0f;
-		  }
+	          if (accel_progress < 0.0f)
+	          {
+	              accel_progress = 0.0f;
+	          }
 
-		  // drive % = 100 × x², generates quadratic curve since accel_fraction^2
-		  float accel_limit_percent =
-		      100.0f *
-		      accel_fraction *
-		      accel_fraction;
+	          if (accel_progress > 1.0f)
+	          {
+	              accel_progress = 1.0f;
+	          }
 
-		  // choose the lower value, does not affect decleration?
-		  if (profile_target < accel_limit_percent)
-		  {
-		      drive_profile_percent = profile_target;
-		  }
-		  else
-		  {
-		      drive_profile_percent = accel_limit_percent;
-		  }
+	          /*
+	           * START_PERCENT -> 100%
+	           *
+	           * EXPONENT = 2 gives quadratic acceleration.
+	           */
+	          accel_limit_percent =
+	              STRAIGHT_ACCEL_START_PERCENT +
+	              (100.0f -
+	               STRAIGHT_ACCEL_START_PERCENT) *
+	              powf(accel_progress,
+	                   STRAIGHT_ACCEL_EXPONENT);
+	      }
+	      else
+	      {
+	          /*
+	           * Extremely short command:
+	           * there is no room for a proper acceleration region.
+	           */
+	          accel_limit_percent =
+	              STRAIGHT_ACCEL_START_PERCENT;
+	      }
+
+
+	      /*
+	       * Whichever profile requires LESS power wins.
+	       *
+	       * Before decel:
+	       *     profile_target = 100%
+	       *     acceleration controls.
+	       *
+	       * During decel:
+	       *     profile_target falls below 100%
+	       *     deceleration controls.
+	       */
+	      if (profile_target < accel_limit_percent)
+	      {
+	          drive_profile_percent =
+	              profile_target;
+	      }
+	      else
+	      {
+	          drive_profile_percent =
+	              accel_limit_percent;
+	      }
+
 	  }
 	  else
 	  {
@@ -3696,12 +3998,32 @@ void motorTask(void const * argument)
 	   * Gain scheduling: pick the gain set for the current direction of travel.
 	   * The PID maths below is identical for both directions.
 	   */
-	  const float steer_kp = is_reverse ? REV_STEER_KP_PERCENT_PER_DEG
-											: FWD_STEER_KP_PERCENT_PER_DEG;
-	  const float steer_ki = is_reverse ? REV_STEER_KI_PERCENT_PER_DEG_S
-											: FWD_STEER_KI_PERCENT_PER_DEG_S;
-	  const float steer_kd = is_reverse ? REV_STEER_KD_PERCENT_PER_DPS
-											: FWD_STEER_KD_PERCENT_PER_DPS;
+		float steer_kp = is_reverse ? REV_STEER_KP_PERCENT_PER_DEG
+		                            : FWD_STEER_KP_PERCENT_PER_DEG;
+
+		const float steer_ki = is_reverse ? REV_STEER_KI_PERCENT_PER_DEG_S
+		                                  : FWD_STEER_KI_PERCENT_PER_DEG_S;
+
+		float steer_kd = is_reverse ? REV_STEER_KD_PERCENT_PER_DPS
+		                            : FWD_STEER_KD_PERCENT_PER_DPS;
+
+		// Distance-aware final heading convergence.
+		// NO Ki HERE. Ki is slow memory. If you suddenly strengthen it just because you're approaching the endpoint, you risk carrying excessive integral steering into the deceleration zone.
+		if (prealign_active)
+		{
+		    const float kp_multiplier =
+		        1.0f +
+		        (STRAIGHT_STEER_PREALIGN_KP_MULT - 1.0f) *
+		        prealign_progress;
+
+		    const float kd_multiplier =
+		        1.0f +
+		        (STRAIGHT_STEER_PREALIGN_KD_MULT - 1.0f) *
+		        prealign_progress;
+
+		    steer_kp *= kp_multiplier;
+		    steer_kd *= kd_multiplier;
+		}
 
 	  /*
 	   * Integral controller + anti-windup.
@@ -3788,14 +4110,25 @@ void motorTask(void const * argument)
 				  : -STRAIGHT_STEER_MIN_PERCENT;
 	  }
 
-	  /* Limit heading correction. */
-	  if (correction_percent > STRAIGHT_STEER_MAX_PERCENT)
+	  float steer_max_percent = STRAIGHT_STEER_MAX_PERCENT;
+
+	  if (prealign_active)
 	  {
-		  correction_percent = STRAIGHT_STEER_MAX_PERCENT;
+	      steer_max_percent =
+	          STRAIGHT_STEER_MAX_PERCENT +
+	          (STRAIGHT_STEER_PREALIGN_MAX_PERCENT -
+	           STRAIGHT_STEER_MAX_PERCENT) *
+	          prealign_progress;
 	  }
-	  else if (correction_percent < -STRAIGHT_STEER_MAX_PERCENT)
+
+	  /* Limit heading correction. */
+	  if (correction_percent > steer_max_percent)
 	  {
-		  correction_percent = -STRAIGHT_STEER_MAX_PERCENT;
+	      correction_percent = steer_max_percent;
+	  }
+	  else if (correction_percent < -steer_max_percent)
+	  {
+	      correction_percent = -steer_max_percent;
 	  }
 
 	  /*
