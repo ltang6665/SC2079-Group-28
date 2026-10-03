@@ -1,0 +1,10 @@
+# Image recognition and streaming
+ultralytics
+opencv-python
+numpy
+
+# Environment configuration
+python-dotenv
+
+# Pathfinding
+python_tsp
