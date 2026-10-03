@@ -4,7 +4,7 @@ from typing import List
 import numpy as np
 from pathfinding.entities.Robot import Robot
 from pathfinding.entities.Entity import Obstacle, CellState, Grid
-from pathfinding.consts import Direction, MOVE_DIRECTION, TURN_FACTOR, ITERATIONS, TURN_RADIUS, SAFE_COST, TURN_BIG, TURN_SMALL
+from pathfinding.consts import Direction, MOVE_DIRECTIONS, TURN_FACTOR, MAX_ITERATIONS, TURN_RADIUS, SAFE_TURN_COST, TURN_BIG, TURN_SMALL
 from python_tsp.exact import solve_tsp_dynamic_programming
 from pathfinding.helper import generateCommands
 
@@ -142,7 +142,7 @@ class MazeSolver:
 
             self.pathCostGenerator(items)
             combination = []
-            self.generateCombination(cur_view_positions, 0, [], combination, [ITERATIONS])
+            self.generateCombination(cur_view_positions, 0, [], combination, [MAX_ITERATIONS])
 
             for c in combination: # run the algo some times ->
                 visited_candidates = [0] # add the start state of the robot
@@ -216,7 +216,7 @@ class MazeSolver:
                             (abs(ob.x - x) == 1 and abs(ob.y - y) == 2) or
                             (abs(ob.x - x) == 2 and abs(ob.y - y) == 1) or
                             (abs(ob.x - x) <= 1 and abs(ob.y - y) <= 1)):
-                        cost = SAFE_COST
+                        cost = SAFE_TURN_COST
                         break
                 cache[(x, y)] = cost
         self._safe_cost_cache = cache
@@ -374,7 +374,7 @@ class MazeSolver:
     def getNeighbors(self, x, y, direction):
         neighbors = []
 
-        for dx, dy, md in MOVE_DIRECTION:
+        for dx, dy, md in MOVE_DIRECTIONS:
             if md == direction:
                 if self.grid.reachable(x + dx, y + dy):
                     safe_cost = self.getSafeCost(x + dx, y + dy)
@@ -384,7 +384,7 @@ class MazeSolver:
                     neighbors.append((x - dx, y - dy, md, safe_cost))
 
         if self.allow_45:
-            for dx, dy, md in MOVE_DIRECTION:
+            for dx, dy, md in MOVE_DIRECTIONS:
                 diff = (int(md) - int(direction)) % 8
                 if diff in [1, 7]:
                     if self.grid.reachable(x + dx, y + dy, turn=True) and self.grid.reachable(x, y, preTurn=True):
@@ -395,7 +395,7 @@ class MazeSolver:
         smaller_change = turn_wrt_big_turns[self.big_turn][1]
         _fvec = {Direction.NORTH: (0, 1), Direction.EAST: (1, 0),
                  Direction.SOUTH: (0, -1), Direction.WEST: (-1, 0)}
-        fwd_penalty = 0 if self._hasForwardClearance(x, y, direction) else SAFE_COST
+        fwd_penalty = 0 if self._hasForwardClearance(x, y, direction) else SAFE_TURN_COST
         bwd_clear = self._hasBackwardClearance(x, y, direction)
         fvec = _fvec.get(direction, (0, 0))
 
@@ -531,16 +531,29 @@ if __name__ == "__main__":
         allow_45=False
     )
 
+    """
+    #1/10/2026
     obstacles = [
-        (5, 7, Direction.SOUTH, 7),
-        (5, 13, Direction.WEST, 9),
-        (7, 19, Direction.SOUTH, 6),
-        (12, 9, Direction.SOUTH, 5),
-        (15, 4, Direction.NORTH, 1),
-        (15, 14, Direction.SOUTH, 2),
-        (19, 8, Direction.WEST, 8),
-        (19, 19, Direction.WEST, 10),
+        (3, 8, Direction.EAST, 1),
+        (6, 14, Direction.SOUTH, 2),
+        (7, 3, Direction.NORTH, 3),
+        (11, 10, Direction.WEST, 4),
+        (12, 17, Direction.SOUTH, 5),
+        (15, 5, Direction.NORTH, 6),
+        (16, 12, Direction.WEST, 7),
     ]
+    """
+    #2/10/2026
+    obstacles = [
+            (7, 2, Direction.NORTH, 1),
+            (4, 14, Direction.SOUTH, 2),
+            (8, 9, Direction.EAST, 3),
+            (3, 7, Direction.EAST, 4),
+            (12, 16, Direction.SOUTH, 5),
+            (13, 5, Direction.NORTH, 6),
+            (16, 11, Direction.WEST, 7),
+        ]
+    obstacles.sort(key=lambda obstacle: obstacle[3])
 
     # Add obstacles to MazeSolver
     for x, y, direction, obstacle_id in obstacles:
